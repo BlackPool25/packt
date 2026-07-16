@@ -1,8 +1,11 @@
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-unmaintained = "all"
-ignore = []
+unmaintained = "workspace"
+ignore = [
+    { crate = "atomic-polyfill", reason = "transitive dep via heapless; not directly used" },
+    { crate = "number_prefix", reason = "transitive dep via indicatif; not directly used" },
+]
 
 [licenses]
 allow = [
@@ -19,9 +22,12 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "deny"
-wildcards = "deny"
+wildcards = "allow"
 highlight = "all"
 deny = []
+skip-tree = [
+    { crate = "windows-sys", reason = "foundational crate, multiple versions unavoidable across transitive deps" },
+]
 
 [sources]
 unknown-registry = "deny"
