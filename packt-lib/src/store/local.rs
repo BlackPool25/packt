@@ -115,8 +115,18 @@ impl LocalStore {
         let file = std::fs::File::open(&tmp_path)?;
         file.sync_all()?;
         drop(file);
-        // Atomic rename
-        std::fs::rename(&tmp_path, &final_path)?;
+        // Atomic rename with retry for Windows (antivirus locking)
+        let mut retries = 0;
+        loop {
+            match std::fs::rename(&tmp_path, &final_path) {
+                Ok(()) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && retries < 10 => {
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50 * retries));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
         // fsync the directory
         if let Ok(dir) = std::fs::File::open(&packs_dir) {
             dir.sync_all()?;
