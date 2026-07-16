@@ -1,0 +1,15 @@
+[profile.dev]
+codegen-units = 256
+incremental = true
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+
+[env]
+CARGO_TERM_COLOR = "always"
