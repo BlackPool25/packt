@@ -1,8 +1,8 @@
 use crate::index::DedupIndex;
 use crate::types::{Hash, PackLocation};
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Concurrent in-memory dedup index backed by DashMap.
 pub struct HashIndex {
@@ -47,9 +47,7 @@ impl BloomFilter {
             key[..8].copy_from_slice(&hash.0[..8]);
             key[0] ^= i as u8;
             let h = blake3::Hasher::new_keyed(&key).update(b"bloom").finalize();
-            let val = u64::from_le_bytes(
-                h.as_bytes()[..8].try_into().unwrap(),
-            );
+            let val = u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap());
             let idx = (val as usize) % self.size;
             indices.push(idx);
         }

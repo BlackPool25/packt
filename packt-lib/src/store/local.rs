@@ -1,8 +1,8 @@
 use crate::error::{PacktError, Result};
 use crate::index::DedupIndex;
+use crate::store::ContentStore;
 use crate::store::pack;
 use crate::store::pack::IndexEntry;
-use crate::store::ContentStore;
 use crate::types::{Hash, PackLocation};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -64,7 +64,8 @@ impl LocalStore {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if let Some(stem) = name_str.strip_suffix(".pack")
-                && let Ok(id) = stem.parse::<u32>() {
+                && let Ok(id) = stem.parse::<u32>()
+            {
                 let path = entry.path();
                 let data = std::fs::read(&path)?;
                 match pack::read_pack(&data) {

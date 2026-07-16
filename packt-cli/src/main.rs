@@ -54,24 +54,29 @@ enum Commands {
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     let cli = Cli::parse();
 
     let result = match &cli.command {
-        Commands::Backup { source, destination, chunk_size } => {
-            backup::run_backup(source, destination, *chunk_size)
-        }
-        Commands::Restore { source, destination } => {
-            restore::run_restore(source, destination)
-        }
+        Commands::Backup {
+            source,
+            destination,
+            chunk_size,
+        } => backup::run_backup(source, destination, *chunk_size),
+        Commands::Restore {
+            source,
+            destination,
+        } => restore::run_restore(source, destination),
         Commands::Info { path } => info::run_info(path),
         Commands::Verify { path } => verify::run_verify(path),
         Commands::Benchmark { corpus } => {
-            println!("Benchmark not yet implemented for corpus: {}", corpus.display());
+            println!(
+                "Benchmark not yet implemented for corpus: {}",
+                corpus.display()
+            );
             Ok(())
         }
     };

@@ -10,7 +10,10 @@ pub struct DedupStage {
 
 impl DedupStage {
     pub fn new(index: Arc<dyn DedupIndex>, store: Arc<dyn ContentStore>) -> Self {
-        Self { index, _store: store }
+        Self {
+            index,
+            _store: store,
+        }
     }
 
     /// Check if a hash already exists in the dedup index.

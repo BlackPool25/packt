@@ -92,9 +92,9 @@ pub fn write_pack(chunks: &[(Hash, Vec<u8>, u32)]) -> Result<Vec<u8>> {
 fn encode_footer(f: &Footer) -> Vec<u8> {
     let mut buf = Vec::with_capacity(FOOTER_SIZE);
     buf.extend_from_slice(&f.index_offset.to_le_bytes()); // 8 bytes
-    buf.extend_from_slice(&f.index_len.to_le_bytes());     // 4 bytes
-    buf.extend_from_slice(&f.checksum);                     // 32 bytes
-    buf.extend_from_slice(&f.magic.to_le_bytes());          // 8 bytes
+    buf.extend_from_slice(&f.index_len.to_le_bytes()); // 4 bytes
+    buf.extend_from_slice(&f.checksum); // 32 bytes
+    buf.extend_from_slice(&f.magic.to_le_bytes()); // 8 bytes
     debug_assert_eq!(buf.len(), FOOTER_SIZE);
     buf
 }
@@ -105,17 +105,28 @@ fn decode_footer(data: &[u8]) -> Result<Footer> {
     }
     let bytes = &data[..FOOTER_SIZE];
     let index_offset = u64::from_le_bytes(
-        bytes[0..8].try_into().map_err(|_| PacktError::InvalidPackFormat("bad index_offset".into()))?
+        bytes[0..8]
+            .try_into()
+            .map_err(|_| PacktError::InvalidPackFormat("bad index_offset".into()))?,
     );
     let index_len = u32::from_le_bytes(
-        bytes[8..12].try_into().map_err(|_| PacktError::InvalidPackFormat("bad index_len".into()))?
+        bytes[8..12]
+            .try_into()
+            .map_err(|_| PacktError::InvalidPackFormat("bad index_len".into()))?,
     );
     let mut checksum = [0u8; 32];
     checksum.copy_from_slice(&bytes[12..44]);
     let magic = u64::from_le_bytes(
-        bytes[44..52].try_into().map_err(|_| PacktError::InvalidPackFormat("bad magic bytes".into()))?
+        bytes[44..52]
+            .try_into()
+            .map_err(|_| PacktError::InvalidPackFormat("bad magic bytes".into()))?,
     );
-    Ok(Footer { index_offset, index_len, checksum, magic })
+    Ok(Footer {
+        index_offset,
+        index_len,
+        checksum,
+        magic,
+    })
 }
 
 /// Read a pack file and return (entries, checksum).
@@ -146,7 +157,9 @@ pub fn read_pack(data: &[u8]) -> Result<(Vec<IndexEntry>, [u8; 32])> {
     let index_start = footer.index_offset as usize;
     let index_end = index_start + footer.index_len as usize;
     if index_end > data.len() - FOOTER_SIZE {
-        return Err(PacktError::InvalidPackFormat("index extends past data".into()));
+        return Err(PacktError::InvalidPackFormat(
+            "index extends past data".into(),
+        ));
     }
 
     let index_slice = &data[index_start..index_end];
@@ -163,7 +176,9 @@ pub fn read_chunk(pack_data: &[u8], loc: &PackLocation) -> Result<Vec<u8>> {
     if end > pack_data.len() {
         return Err(PacktError::InvalidPackFormat(format!(
             "chunk {}+{} exceeds pack size {}",
-            loc.offset, loc.length, pack_data.len()
+            loc.offset,
+            loc.length,
+            pack_data.len()
         )));
     }
 

@@ -1,15 +1,15 @@
-pub mod hasher_stage;
 pub mod dedup_stage;
+pub mod hasher_stage;
+use crate::chunking::Chunker;
 use crate::error::{PacktError, Result};
-use crate::pipeline::hasher_stage::HasherStage;
-use crate::pipeline::dedup_stage::DedupStage;
-use crate::types::{Chunk, ChunkConfig};
-use crate::store::ContentStore;
+use crate::hash::ContentHasher;
 use crate::index::DedupIndex;
-    use crate::chunking::Chunker;
-    use crate::hash::ContentHasher;
+use crate::pipeline::dedup_stage::DedupStage;
+use crate::pipeline::hasher_stage::HasherStage;
+use crate::store::ContentStore;
+use crate::types::{Chunk, ChunkConfig};
 
-    use std::fs::File;
+use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -49,7 +49,12 @@ impl BackupPipeline {
         store: Arc<dyn ContentStore>,
         index: Arc<dyn DedupIndex>,
     ) -> Self {
-        Self { config, hasher, store, index }
+        Self {
+            config,
+            hasher,
+            store,
+            index,
+        }
     }
 
     /// Run the backup pipeline on a single file using streaming CDC.
@@ -84,12 +89,8 @@ impl BackupPipeline {
         })?;
 
         // Stream chunks via fastcdc's StreamCDC — internal buffer = max_size
-        let chunker = fastcdc::v2020::StreamCDC::new(
-            file,
-            config.min_size,
-            config.avg_size,
-            config.max_size,
-        );
+        let chunker =
+            fastcdc::v2020::StreamCDC::new(file, config.min_size, config.avg_size, config.max_size);
 
         let (dedup_tx, dedup_rx): (crossbeam_channel::Sender<DedupMessage>, _) =
             crossbeam_channel::bounded(64);
@@ -113,7 +114,10 @@ impl BackupPipeline {
                     }
                 }
                 store.flush()?;
-                Ok(WriterOutput { dedup_count, stored_count })
+                Ok(WriterOutput {
+                    dedup_count,
+                    stored_count,
+                })
             })
         };
 
@@ -121,9 +125,8 @@ impl BackupPipeline {
         let mut total_chunks = 0u64;
 
         for result in chunker {
-            let chunk_data = result.map_err(|e| {
-                PacktError::Pipeline(format!("StreamCDC error: {e}"))
-            })?;
+            let chunk_data =
+                result.map_err(|e| PacktError::Pipeline(format!("StreamCDC error: {e}")))?;
 
             let chunk = Chunk {
                 offset: chunk_data.offset,
@@ -154,9 +157,9 @@ impl BackupPipeline {
         drop(dedup_tx);
 
         // Wait for writer
-        let writer_output = writer_handle.join().map_err(|e| {
-            PacktError::Pipeline(format!("Writer thread panicked: {e:?}"))
-        })??;
+        let writer_output = writer_handle
+            .join()
+            .map_err(|e| PacktError::Pipeline(format!("Writer thread panicked: {e:?}")))??;
 
         stats.unique_chunks = writer_output.stored_count;
         stats.dedup_chunks = writer_output.dedup_count;
@@ -169,8 +172,14 @@ impl BackupPipeline {
 
 /// Messages sent to the writer stage.
 pub enum DedupMessage {
-    NewChunk { hash: crate::types::Hash, data: Vec<u8> },
-    Duplicate { hash: crate::types::Hash, pack_id: u32 },
+    NewChunk {
+        hash: crate::types::Hash,
+        data: Vec<u8>,
+    },
+    Duplicate {
+        hash: crate::types::Hash,
+        pack_id: u32,
+    },
 }
 
 struct WriterOutput {

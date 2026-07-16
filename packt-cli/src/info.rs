@@ -1,5 +1,5 @@
-use std::path::Path;
 use anyhow::Result;
+use std::path::Path;
 
 pub fn run_info(path: &Path) -> Result<()> {
     if !path.exists() {
@@ -20,14 +20,19 @@ pub fn run_info(path: &Path) -> Result<()> {
         .collect();
     let pack_count = pack_files.len();
 
-    let total_pack_size: u64 = pack_files.iter()
+    let total_pack_size: u64 = pack_files
+        .iter()
         .filter_map(|e| e.metadata().ok())
         .map(|m| m.len())
         .sum();
 
     println!("Store: {}", path.display());
     println!("  Packs:        {} files", pack_count);
-    println!("  Pack size:     {} bytes ({:.2} MB)", total_pack_size, total_pack_size as f64 / 1_048_576.0);
+    println!(
+        "  Pack size:     {} bytes ({:.2} MB)",
+        total_pack_size,
+        total_pack_size as f64 / 1_048_576.0
+    );
 
     Ok(())
 }
