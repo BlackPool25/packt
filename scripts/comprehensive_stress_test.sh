@@ -12,7 +12,7 @@ RESULTS_FILE="${WORK_DIR}/results.log"
 TESTS_PASSED=0; TESTS_FAILED=0; TESTS_SKIPPED=0
 
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
-echo -e "${CYAN}     Sieve Phase 1 — Comprehensive Stress Test    ${NC}"
+echo -e "${CYAN}     Packt Phase 1 — Comprehensive Stress Test    ${NC}"
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
 echo "Started: $(date)"
 echo "Work dir: $WORK_DIR"
@@ -34,7 +34,7 @@ run_test() {
 }
 
 # === TEST 1: Docker cross-version packt (same image, sequential versions) ===
-echo -e "\n${CYAN}[Test Suite 1] Cross-Version Sieve — Ubuntu LTS versions${NC}"
+echo -e "\n${CYAN}[Test Suite 1] Cross-Version Packt — Ubuntu LTS versions${NC}"
 
 for IMG in "ubuntu:22.04" "ubuntu:23.04" "ubuntu:23.10" "ubuntu:24.04"; do
     VER="${IMG#ubuntu:}"
@@ -79,7 +79,7 @@ U_ORIG=$(stat --format=%s "${WORK_DIR}/2204.bin" "${WORK_DIR}/2304.bin" "${WORK_
 echo -e "      Original: $(numfmt --to=iec-i --suffix=B $U_ORIG) → Stored: $(numfmt --to=iec-i --suffix=B $U_INFO) (Ratio: $(echo "scale=2; $U_ORIG / $U_INFO" | bc)x)"
 
 # === TEST 2: Different image families (cross-image dedup) ===
-echo -e "\n${CYAN}[Test Suite 2] Cross-Image Sieve — Different image families${NC}"
+echo -e "\n${CYAN}[Test Suite 2] Cross-Image Packt — Different image families${NC}"
 
 for IMG in "alpine:3.18" "alpine:3.19" "alpine:3.20" "debian:11" "debian:12" "python:3.11-slim" "python:3.12-slim" "node:18-slim" "node:20-slim"; do
     echo -n "  Pulling $IMG... "

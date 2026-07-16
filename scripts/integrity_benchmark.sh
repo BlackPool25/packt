@@ -66,7 +66,7 @@ $COMPRESSOR_BIN verify "$EVOLVE_STORE" && echo -e "  ${PASS} All version chunks 
 EVOLVE_SIZE=$(du -sb "$EVOLVE_STORE" | cut -f1)
 EVOLVE_ORIG=$(( (20 + 20 + 20) * 1024 * 1024 ))
 EVOLVE_RATIO=$(echo "scale=2; $EVOLVE_ORIG / $EVOLVE_SIZE" | bc)
-echo -e "  ${GREEN}Sieve across 3 versions: ${EVOLVE_RATIO}x (${EVOLVE_ORIG} → ${EVOLVE_SIZE} bytes)${NC}"
+echo -e "  ${GREEN}Packt across 3 versions: ${EVOLVE_RATIO}x (${EVOLVE_ORIG} → ${EVOLVE_SIZE} bytes)${NC}"
 
 # === INTEGRITY TEST 3: Distinct file packt (cross-file) ===
 echo -e "\n${YELLOW}[4/5] Integrity Test: cross-file packt (identical prefix)${NC}"

@@ -1,4 +1,4 @@
-# Sieve
+# Packt
 
 **Content-defined chunking with exact dedup for binary data.**
 
@@ -26,26 +26,26 @@ Source file → FastCDC chunking → BLAKE3 hashing → Exact dedup → Pack sto
 cargo build --release
 
 # Backup a file
-./target/release/sieve backup ./myfile.big ./backup-store/
+./target/release/packt backup ./myfile.big ./backup-store/
 
 # Check store info
-./target/release/sieve info ./backup-store/
+./target/release/packt info ./backup-store/
 
 # Verify pack integrity (checks every chunk)
-./target/release/sieve verify ./backup-store/
+./target/release/packt verify ./backup-store/
 
 # Restore files
-./target/release/sieve restore ./backup-store/ ./restored/
+./target/release/packt restore ./backup-store/ ./restored/
 ```
 
 ## CLI
 
 ```
-sieve backup <source> <destination>     Create deduplicated backup
-sieve restore <source> <dest-dir>       Restore from backup
-sieve info <path>                       Show store statistics
-sieve verify <path>                     Verify pack integrity
-sieve benchmark <corpus>                Run performance benchmarks
+packt backup <source> <destination>     Create deduplicated backup
+packt restore <source> <dest-dir>       Restore from backup
+packt info <path>                       Show store statistics
+packt verify <path>                     Verify pack integrity
+packt benchmark <corpus>                Run performance benchmarks
 ```
 
 Backups store file metadata (path, size, modification time, permissions) alongside chunk hashes. Restore preserves all metadata.
@@ -54,12 +54,12 @@ Backups store file metadata (path, size, modification time, permissions) alongsi
 
 ```rust
 use std::sync::Arc;
-use sieve_lib::chunking::fastcdc::FastCdcChunker;
-use sieve_lib::hash::blake3_hasher::Blake3Hasher;
-use sieve_lib::index::hashindex::HashIndex;
-use sieve_lib::pipeline::{BackupPipeline, PipelineConfig};
-use sieve_lib::store::local::LocalStore;
-use sieve_lib::types::ChunkConfig;
+use packt_lib::chunking::fastcdc::FastCdcChunker;
+use packt_lib::hash::blake3_hasher::Blake3Hasher;
+use packt_lib::index::hashindex::HashIndex;
+use packt_lib::pipeline::{BackupPipeline, PipelineConfig};
+use packt_lib::store::local::LocalStore;
+use packt_lib::types::ChunkConfig;
 
 // Setup
 let store = Arc::new(LocalStore::open("./backup-store")?);
@@ -102,8 +102,8 @@ cargo audit
 ## Project Structure
 
 ```
-sieve/
-├── sieve-lib/              # Library crate (the product)
+packt/
+├── packt-lib/              # Library crate (the product)
 │   └── src/
 │       ├── chunking/       # FastCDC v2020 chunking
 │       ├── hash/           # BLAKE3 content hashing
@@ -111,8 +111,8 @@ sieve/
 │       ├── index/          # Concurrent dedup index with Bloom filter
 │       ├── pipeline/       # Pipeline orchestrator (streaming)
 │       └── types.rs        # Core types: Chunk, Hash, PackLocation
-├── sieve-cli/              # CLI binary (the demo/dogfood)
-└── sieve-lib/tests/        # Integration tests
+├── packt-cli/              # CLI binary (the demo/dogfood)
+└── packt-lib/tests/        # Integration tests
 ```
 
 ## Performance

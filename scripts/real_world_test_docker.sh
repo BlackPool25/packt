@@ -10,7 +10,7 @@ STORE_DIR="${WORK_DIR}/store"
 LAYERS_DIR="${WORK_DIR}/layers"
 COMPRESSOR_BIN="${CARGO_TARGET_DIR:-target}/release/packt-cli"
 
-echo -e "${CYAN}=== Real-World Docker Layer Sieve Test ===${NC}"
+echo -e "${CYAN}=== Real-World Docker Layer Packt Test ===${NC}"
 echo "Image:        $IMAGE"
 echo "Versions:     ${VERSIONS[*]}"
 echo ""
@@ -104,7 +104,7 @@ echo "  Stored:         $(numfmt --to=iec-i --suffix=B $STORE_SIZE)"
 if [ "$TOTAL_ORIG_SIZE" -gt 0 ] && [ "$STORE_SIZE" -gt 0 ]; then
     RATIO=$(echo "scale=2; $TOTAL_ORIG_SIZE / $STORE_SIZE" | bc 2>/dev/null || echo "0")
     SAVINGS=$(echo "scale=1; (1 - $STORE_SIZE.0 / $TOTAL_ORIG_SIZE) * 100" | bc 2>/dev/null || echo "0")
-    echo "  Sieve ratio:    ${RATIO}x"
+    echo "  Packt ratio:    ${RATIO}x"
     echo "  Space savings:  ${SAVINGS}%"
 fi
 echo "  Duration:       ${DURATION_MS}ms"
