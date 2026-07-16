@@ -5,6 +5,30 @@
 ### Changed
 - **Crate rename**: `compressor-lib` → `dedup-lib`, `compressor-cli` → `dedup-cli`, binary `compressor` → `dedup`
 - **Error type rename**: `CompressionError` → `DedupError`
+- **CI/CD overhaul**: Production-grade pipeline with 8 quality gates (was 6). See `cicd-pipeline-overhaul.md` plan.
+
+### Added (CI/CD)
+- **Release workflow**: Automated crates.io publish + GitHub release on `v*` tag
+- **Security workflow**: `cargo-deny` for advisories + licenses + bans on PR/push + weekly schedule
+- **Code coverage**: `cargo-llvm-cov` with Codecov upload
+- **Documentation build check**: `cargo doc` with `-D warnings`
+- **MSRV verification**: CI job building at `rust-version = "1.85"` (Edition 2024 minimum)
+- **Beta toolchain**: Added to test matrix for early regression detection
+- **Concurrency control**: `cancel-in-progress: true` to save runner minutes
+- **Reproducible builds**: `--locked` on all cargo commands
+- **`--all-features`**: All build/test/lint commands now cover feature-gated code
+- **Per-cell cache keys**: Separate cache buckets per OS/toolchain to prevent collisions
+- **Contributor files**: Bug/feature issue templates, PR template, CONTRIBUTING.md, SECURITY.md
+- **`ci-coverage.sh`**: Local coverage script matching CI
+- **Config files**: `deny.toml`, `.cargo/config.toml`, `clippy.toml`, `rustfmt.toml`
+
+### Changed (CI/CD)
+- **ci.yml rewritten**: From 75→108 lines. Combined fmt+clippy into single lint job. Removed redundant `build-all` job. Added `permissions: contents: read`, `RUSTFLAGS: -D warnings`, `timeout-minutes` per job.
+- **Audit moved**: From inline `cargo install cargo-audit` in ci.yml to `cargo-deny-action` in security.yml (no compile overhead, includes license/bans/sources).
+- **`rust-toolchain.toml`**: Added `llvm-tools-preview` component for coverage tooling.
+
+### Fixed (library)
+- **Removed `unwrap()` in library code**: `HashIndex` bloom filter lock and hash conversion now use `expect()` with descriptive messages.
 - **bincode → postcard**: Replaced defunct bincode v2 with maintained postcard for pack serialization
 - **dependencies**: Removed `memmap2` (unused), removed `zstd` experimental feature (premature for Phase 1)
 
