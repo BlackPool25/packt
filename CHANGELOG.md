@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0] - 2026-07-16
+
+### Changed
+- **Project rename**: `dedup` → `packt` (binary, crates, error types, all references)
+- **CI**: Fixed Windows build (Unix permission gating), bench target, audit caching
+- **Git workflow**: Added PR-only rule — never push to main directly
+
+### Added
+- Streaming pipeline via `fastcdc::StreamCDC` — ~8 MB peak memory, no full file load
+- Cross-platform helpers for Unix permissions (`#[cfg(unix)]`)
+
+### Removed
+- `SourceReader` (replaced by streaming)
+- `ChunkerStage` (replaced by StreamCDC)
+- `reader.rs`, `chunker_stage.rs` modules
+
 ## [0.2.0] - 2026-07-16
 
 ### Changed
@@ -55,7 +71,7 @@
 - **Metadata restoration**: Restore command now preserves file mtime and permissions
 - **Backward compat**: Old manifests (bare hash lists) are still readable
 - **Criterion benchmarks**: `chunking_throughput`, `hashing_throughput`, `pack_roundtrip`
-- `pub use error::Result as DedupResult` for library users
+- `pub use error::Result as PacktResult` for library users
 - Manifest metadata tests
 
 ### Naming
