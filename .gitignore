@@ -1,6 +1,9 @@
 target/
 *.pyc
 .DS_Store
+.omo/
+RULES.md
+LEARNING.md
 *.swp
 *.swo
 *~
