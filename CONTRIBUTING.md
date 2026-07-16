@@ -28,7 +28,6 @@
 ## Phase Discipline
 - Each phase builds on the previous without modifying it
 - Read DECISIONS.md before making architecture decisions
-- Read RULES.md before starting implementation
 
 ## CI/CD
 - All PRs run: fmt, clippy, tests (3 OS), coverage, MSRV check, docs build
