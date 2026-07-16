@@ -1,7 +1,6 @@
-use std::path::Path;
 use anyhow::{Context, Result};
 use packt_lib::store::ContentStore;
-use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use crate::backup::ManifestEntry;
 
@@ -29,26 +28,39 @@ fn restore_metadata(path: &Path, entry: &ManifestEntry) {
         let ft = filetime::FileTime::from_unix_time(secs as i64, 0);
         filetime::set_file_mtime(path, ft).ok();
     }
-    // Restore permissions.
-    if entry.permissions != 0 {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(entry.permissions)).ok();
+    // Restore permissions (Unix only).
+    set_unix_permissions(path, entry.permissions);
+}
+
+/// Set Unix file permissions. No-op on non-Unix platforms.
+#[cfg(unix)]
+fn set_unix_permissions(path: &Path, mode: u32) {
+    if mode != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).ok();
     }
 }
+
+/// Set Unix file permissions. No-op on non-Unix platforms.
+#[cfg(not(unix))]
+fn set_unix_permissions(_path: &Path, _mode: u32) {}
 
 pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
     if !source.exists() {
         anyhow::bail!("Store path does not exist: {}", source.display());
     }
 
-    let store = packt_lib::store::local::LocalStore::open(source)
-        .context("Failed to open store")?;
+    let store =
+        packt_lib::store::local::LocalStore::open(source).context("Failed to open store")?;
 
     std::fs::create_dir_all(destination)
         .with_context(|| format!("Failed to create destination: {}", destination.display()))?;
 
     let manifests_dir = source.join("manifests");
     if !manifests_dir.exists() {
-        anyhow::bail!("No manifests directory found. No files have been backed up with manifest tracking.");
+        anyhow::bail!(
+            "No manifests directory found. No files have been backed up with manifest tracking."
+        );
     }
 
     let mut restored_count = 0u64;
@@ -74,7 +86,8 @@ pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
             for hash_hex in &manifest_entry.chunk_hashes {
                 let hash = packt_lib::types::Hash::from_hex(hash_hex)
                     .map_err(|e| anyhow::anyhow!("Invalid hash in manifest: {e}"))?;
-                let chunk_data = store.get(&hash)
+                let chunk_data = store
+                    .get(&hash)
                     .with_context(|| format!("Failed to read chunk {hash_hex}"))?;
                 file_data.extend_from_slice(&chunk_data);
             }
@@ -88,8 +101,12 @@ pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
 
             restored_count += 1;
             total_bytes += file_data.len() as u64;
-            eprintln!("  ✓ Restored {} ({} chunks, {} bytes)",
-                manifest_entry.path, manifest_entry.chunk_hashes.len(), file_data.len());
+            eprintln!(
+                "  ✓ Restored {} ({} chunks, {} bytes)",
+                manifest_entry.path,
+                manifest_entry.chunk_hashes.len(),
+                file_data.len()
+            );
         }
     }
 
@@ -98,8 +115,10 @@ pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
         return Ok(());
     }
 
-    println!("Restore complete: {restored_count} files, {total_bytes} bytes to {}",
-        destination.display());
+    println!(
+        "Restore complete: {restored_count} files, {total_bytes} bytes to {}",
+        destination.display()
+    );
 
     // Verify reconstruction
     for entry in std::fs::read_dir(&manifests_dir)? {

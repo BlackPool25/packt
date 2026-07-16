@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --workspace -- --quick  # Quick mode in CI
+      - run: cargo bench -p packt-lib  # Only packt-lib has benchmarks
 
   audit:
     name: Security Audit
@@ -60,7 +60,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cargo-audit
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install --locked cargo-audit
       - run: cargo audit
 
   build-all:
