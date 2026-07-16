@@ -1,0 +1,15 @@
+target/
+*.pyc
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.profraw
+*.gcov
+*.gcda
+*.gcno
+flamegraph.svg
+perf.data
+perf.data.old
