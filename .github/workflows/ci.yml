@@ -95,7 +95,12 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
       - run: cargo build --workspace --all-features --locked
-      - run: cargo test --workspace --all-features --locked
+      - name: Run tests (Unix)
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --all-features --locked
+      - name: Run tests (Windows, serial for tempfile stability)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --all-features --locked -- --test-threads 1
 
   bench:
     name: Benchmarks
