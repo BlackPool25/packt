@@ -13,11 +13,7 @@ use tempfile::TempDir;
 pub fn test_backup_env(
     corpus: &[u8],
     chunk_size: usize,
-) -> (
-    TempDir,
-    BackupPipeline,
-    Arc<packt_lib::store::local::LocalStore>,
-) {
+) -> (TempDir, BackupPipeline, Arc<packt_lib::store::local::LocalStore>) {
     let store_dir = TempDir::new().expect("Failed to create temp store dir");
 
     let config = ChunkConfig {

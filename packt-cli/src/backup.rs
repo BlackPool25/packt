@@ -77,9 +77,7 @@ pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize) -> Resul
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let stats = pipeline
-        .backup_file(source)
-        .context("Backup pipeline failed")?;
+    let stats = pipeline.backup_file(source).context("Backup pipeline failed")?;
 
     // Collect file metadata
     let metadata = std::fs::metadata(source).context("Failed to read source metadata")?;
@@ -103,8 +101,7 @@ pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize) -> Resul
     let manifests_dir = destination.join("manifests");
     std::fs::create_dir_all(&manifests_dir).context("Failed to create manifests directory")?;
     let manifest_path = manifests_dir.join(format!("{}.manifest", source_name));
-    let manifest_json =
-        serde_json::to_string_pretty(&manifest_entry).context("Failed to serialize manifest")?;
+    let manifest_json = serde_json::to_string_pretty(&manifest_entry).context("Failed to serialize manifest")?;
     std::fs::write(&manifest_path, &manifest_json).context("Failed to write manifest")?;
 
     println!("Backup complete:");

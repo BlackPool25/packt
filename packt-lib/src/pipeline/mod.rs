@@ -89,11 +89,9 @@ impl BackupPipeline {
         })?;
 
         // Stream chunks via fastcdc's StreamCDC — internal buffer = max_size
-        let chunker =
-            fastcdc::v2020::StreamCDC::new(file, config.min_size, config.avg_size, config.max_size);
+        let chunker = fastcdc::v2020::StreamCDC::new(file, config.min_size, config.avg_size, config.max_size);
 
-        let (dedup_tx, dedup_rx): (crossbeam_channel::Sender<DedupMessage>, _) =
-            crossbeam_channel::bounded(64);
+        let (dedup_tx, dedup_rx): (crossbeam_channel::Sender<DedupMessage>, _) = crossbeam_channel::bounded(64);
 
         let writer_handle = {
             let store = self.store.clone();
@@ -125,8 +123,7 @@ impl BackupPipeline {
         let mut total_chunks = 0u64;
 
         for result in chunker {
-            let chunk_data =
-                result.map_err(|e| PacktError::Pipeline(format!("StreamCDC error: {e}")))?;
+            let chunk_data = result.map_err(|e| PacktError::Pipeline(format!("StreamCDC error: {e}")))?;
 
             let chunk = Chunk {
                 offset: chunk_data.offset,
@@ -145,10 +142,7 @@ impl BackupPipeline {
                 let _ = dedup_tx.send(DedupMessage::Duplicate { hash, pack_id: 0 });
                 stats.dedup_size += chunk_len;
             } else {
-                let _ = dedup_tx.send(DedupMessage::NewChunk {
-                    hash,
-                    data: chunk.data,
-                });
+                let _ = dedup_tx.send(DedupMessage::NewChunk { hash, data: chunk.data });
                 stats.stored_size += chunk_len;
             }
         }
@@ -172,14 +166,8 @@ impl BackupPipeline {
 
 /// Messages sent to the writer stage.
 pub enum DedupMessage {
-    NewChunk {
-        hash: crate::types::Hash,
-        data: Vec<u8>,
-    },
-    Duplicate {
-        hash: crate::types::Hash,
-        pack_id: u32,
-    },
+    NewChunk { hash: crate::types::Hash, data: Vec<u8> },
+    Duplicate { hash: crate::types::Hash, pack_id: u32 },
 }
 
 struct WriterOutput {

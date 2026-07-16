@@ -50,8 +50,7 @@ fn hashing_throughput(c: &mut Criterion) {
 fn pack_roundtrip(c: &mut Criterion) {
     let chunks: Vec<(Hash, Vec<u8>, u32)> = (0..1000)
         .map(|i| {
-            let data =
-                format!("benchmark pack chunk {i} with some extra data for realistic sizing");
+            let data = format!("benchmark pack chunk {i} with some extra data for realistic sizing");
             let len = data.len() as u32;
             let data_bytes = data.into_bytes();
             let hash = Hash::from_blake3(blake3::hash(&data_bytes));
@@ -71,10 +70,5 @@ fn pack_roundtrip(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    chunking_throughput,
-    hashing_throughput,
-    pack_roundtrip
-);
+criterion_group!(benches, chunking_throughput, hashing_throughput, pack_roundtrip);
 criterion_main!(benches);

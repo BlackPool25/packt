@@ -50,17 +50,14 @@ pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
         anyhow::bail!("Store path does not exist: {}", source.display());
     }
 
-    let store =
-        packt_lib::store::local::LocalStore::open(source).context("Failed to open store")?;
+    let store = packt_lib::store::local::LocalStore::open(source).context("Failed to open store")?;
 
     std::fs::create_dir_all(destination)
         .with_context(|| format!("Failed to create destination: {}", destination.display()))?;
 
     let manifests_dir = source.join("manifests");
     if !manifests_dir.exists() {
-        anyhow::bail!(
-            "No manifests directory found. No files have been backed up with manifest tracking."
-        );
+        anyhow::bail!("No manifests directory found. No files have been backed up with manifest tracking.");
     }
 
     let mut restored_count = 0u64;

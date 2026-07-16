@@ -62,10 +62,7 @@ fn test_integration_dedup_identical_files() {
     let _stats1 = pipeline.backup_file(&source).unwrap();
     let stats2 = pipeline.backup_file(&source).unwrap();
 
-    assert!(
-        stats2.dedup_chunks > 0,
-        "Second backup should deduplicate chunks"
-    );
+    assert!(stats2.dedup_chunks > 0, "Second backup should deduplicate chunks");
     store.flush().unwrap();
 }
 
@@ -118,10 +115,7 @@ fn test_integration_empty_file() {
     fs::write(&source, data).unwrap();
 
     let stats = pipeline.backup_file(&source).unwrap();
-    assert_eq!(
-        stats.total_chunks, 0,
-        "Empty file should produce zero chunks"
-    );
+    assert_eq!(stats.total_chunks, 0, "Empty file should produce zero chunks");
     store.flush().unwrap();
 }
 
@@ -168,10 +162,7 @@ fn test_different_chunk_sizes() {
         let chunker = FastCdcChunker::new(config);
         let chunks = chunker.chunk(&data);
 
-        assert!(
-            !chunks.is_empty(),
-            "Avg size {avg_size} should produce chunks"
-        );
+        assert!(!chunks.is_empty(), "Avg size {avg_size} should produce chunks");
         let total: u64 = chunks.iter().map(|c| u64::from(c.length)).sum();
         assert_eq!(total, data.len() as u64);
     }

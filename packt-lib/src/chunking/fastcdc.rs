@@ -19,12 +19,8 @@ impl Chunker for FastCdcChunker {
         // Use the fastcdc crate's v2020 module
         let source_len = data.len() as u64;
 
-        let fastcdc_chunker = fastcdc::v2020::FastCDC::new(
-            data,
-            self.config.min_size,
-            self.config.avg_size,
-            self.config.max_size,
-        );
+        let fastcdc_chunker =
+            fastcdc::v2020::FastCDC::new(data, self.config.min_size, self.config.avg_size, self.config.max_size);
 
         let mut chunks = Vec::new();
         let mut last_end = 0u64;
@@ -34,10 +30,7 @@ impl Chunker for FastCdcChunker {
             let length = window.length as u32;
 
             // Handle gap-free coverage
-            assert!(
-                offset == last_end,
-                "Chunk offset {offset} != expected {last_end}"
-            );
+            assert!(offset == last_end, "Chunk offset {offset} != expected {last_end}");
 
             let chunk_data = data[offset as usize..(offset + u64::from(length)) as usize].to_vec();
             chunks.push(Chunk {
@@ -81,10 +74,7 @@ mod tests {
         let chunker = FastCdcChunker::new(config);
         let data = b"hello world this is a test of variable length content that should produce at least one chunk even though its shorter than the average chunk size";
         let chunks = chunker.chunk(data);
-        assert!(
-            !chunks.is_empty(),
-            "Non-empty input should produce at least one chunk"
-        );
+        assert!(!chunks.is_empty(), "Non-empty input should produce at least one chunk");
         // Verify coverage
         let total: u64 = chunks.iter().map(|c| u64::from(c.length)).sum();
         assert_eq!(total, data.len() as u64, "Chunks must cover entire input");
@@ -122,10 +112,7 @@ mod tests {
         assert!(!chunks.is_empty(), "All zeros input must produce chunks");
         // Verify no chunk exceeds max_size
         for chunk in &chunks {
-            assert!(
-                chunk.length <= config.max_size as u32,
-                "Chunk exceeds max size"
-            );
+            assert!(chunk.length <= config.max_size as u32, "Chunk exceeds max size");
         }
         // Verify coverage
         let total: u64 = chunks.iter().map(|c| u64::from(c.length)).sum();

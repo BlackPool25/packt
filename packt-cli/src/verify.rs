@@ -47,28 +47,21 @@ pub fn run_verify(path: &Path) -> Result<()> {
                     match packt_lib::store::pack::read_chunk(&data, &loc) {
                         Ok(decompressed) => {
                             // Verify hash matches
-                            let actual_hash =
-                                packt_lib::types::Hash::from_blake3(blake3::hash(&decompressed));
+                            let actual_hash = packt_lib::types::Hash::from_blake3(blake3::hash(&decompressed));
                             if actual_hash != entry.hash {
                                 eprintln!("    ✗ Chunk hash mismatch at offset {}", entry.offset);
                                 failed += 1;
                             }
                         }
                         Err(e) => {
-                            eprintln!(
-                                "    ✗ Chunk at offset {} decompression failed: {e}",
-                                entry.offset
-                            );
+                            eprintln!("    ✗ Chunk at offset {} decompression failed: {e}", entry.offset);
                             failed += 1;
                         }
                     }
                 }
             }
             Err(e) => {
-                eprintln!(
-                    "  ✗ {} verification failed: {e}",
-                    entry.file_name().to_string_lossy()
-                );
+                eprintln!("  ✗ {} verification failed: {e}", entry.file_name().to_string_lossy());
                 failed += 1;
             }
         }

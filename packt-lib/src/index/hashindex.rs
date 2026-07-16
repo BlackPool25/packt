@@ -47,7 +47,11 @@ impl BloomFilter {
             key[..8].copy_from_slice(&hash.0[..8]);
             key[0] ^= i as u8;
             let h = blake3::Hasher::new_keyed(&key).update(b"bloom").finalize();
-            let val = u64::from_le_bytes(h.as_bytes()[..8].try_into().expect("blake3 hash is 32 bytes; first 8 always valid for u64 conversion"));
+            let val = u64::from_le_bytes(
+                h.as_bytes()[..8]
+                    .try_into()
+                    .expect("blake3 hash is 32 bytes; first 8 always valid for u64 conversion"),
+            );
             let idx = (val as usize) % self.size;
             indices.push(idx);
         }
@@ -88,7 +92,10 @@ impl HashIndex {
 
 impl DedupIndex for HashIndex {
     fn insert(&self, hash: Hash, location: PackLocation) {
-        self.bloom_filter.lock().expect("bloom filter mutex poisoned").insert(&hash);
+        self.bloom_filter
+            .lock()
+            .expect("bloom filter mutex poisoned")
+            .insert(&hash);
         let prev = self.map.insert(hash, location);
         if prev.is_none() {
             self.count.fetch_add(1, Ordering::Relaxed);
@@ -97,7 +104,12 @@ impl DedupIndex for HashIndex {
 
     fn lookup(&self, hash: &Hash) -> Option<PackLocation> {
         // Quick negative check via bloom filter
-        if !self.bloom_filter.lock().expect("bloom filter mutex poisoned").might_contain(hash) {
+        if !self
+            .bloom_filter
+            .lock()
+            .expect("bloom filter mutex poisoned")
+            .might_contain(hash)
+        {
             return None;
         }
         self.map.get(hash).map(|r| *r.value())

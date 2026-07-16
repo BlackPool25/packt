@@ -67,8 +67,8 @@ pub fn write_pack(chunks: &[(Hash, Vec<u8>, u32)]) -> Result<Vec<u8>> {
 
     let index_offset = pack.len() as u64;
     let index = PackIndex { entries };
-    let index_bytes = postcard::to_stdvec(&index)
-        .map_err(|e| PacktError::Serialization(format!("postcard index: {e}")))?;
+    let index_bytes =
+        postcard::to_stdvec(&index).map_err(|e| PacktError::Serialization(format!("postcard index: {e}")))?;
     let index_len = index_bytes.len() as u32;
     pack.extend_from_slice(&index_bytes);
 
@@ -157,14 +157,12 @@ pub fn read_pack(data: &[u8]) -> Result<(Vec<IndexEntry>, [u8; 32])> {
     let index_start = footer.index_offset as usize;
     let index_end = index_start + footer.index_len as usize;
     if index_end > data.len() - FOOTER_SIZE {
-        return Err(PacktError::InvalidPackFormat(
-            "index extends past data".into(),
-        ));
+        return Err(PacktError::InvalidPackFormat("index extends past data".into()));
     }
 
     let index_slice = &data[index_start..index_end];
-    let (pack_index, _): (PackIndex, _) = postcard::take_from_bytes(index_slice)
-        .map_err(|e| PacktError::InvalidPackFormat(format!("bad index: {e}")))?;
+    let (pack_index, _): (PackIndex, _) =
+        postcard::take_from_bytes(index_slice).map_err(|e| PacktError::InvalidPackFormat(format!("bad index: {e}")))?;
 
     Ok((pack_index.entries, footer.checksum))
 }
