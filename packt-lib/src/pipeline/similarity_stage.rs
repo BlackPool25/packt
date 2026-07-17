@@ -30,6 +30,9 @@ pub enum SimilarityOutcome {
 }
 
 impl SimilarityStage {
+    /// Create a new similarity stage with the given configuration.
+    /// The Palantir index starts empty — use `set_index()` to restore from
+    /// previously persisted signatures.
     #[must_use]
     pub fn new(config: SimilarityConfig) -> Self {
         let index = PalantirIndex::new(config.memory_budget);
@@ -39,18 +42,25 @@ impl SimilarityStage {
         }
     }
 
+    /// Replace the index with a pre-built one (e.g., rebuilt from stored signatures).
+    pub fn set_index(&self, index: PalantirIndex) {
+        if let Ok(mut guard) = self.index.lock() {
+            *guard = index;
+        }
+    }
+
     pub fn process(&self, hash: Hash, data: Vec<u8>) -> SimilarityOutcome {
         let Some(signature) = extract_signature(&data) else {
             return SimilarityOutcome::TooSmall { hash, data };
         };
 
-        let candidate = {
-            let mut index = self.index.lock().expect("Palantir index lock poisoned");
-            index.query(&hash, &signature)
-        };
+        let candidate = self
+            .index
+            .lock()
+            .ok()
+            .and_then(|mut index| index.query(&hash, &signature));
 
         if let Some(candidate) = candidate {
-            // Filter by threshold: only accept tiers that meet the configured threshold
             let tier_ok = match candidate.tier {
                 SimilarityTier::High => self.config.threshold <= 1.0,
                 SimilarityTier::Medium => self.config.threshold <= 0.85,
@@ -64,15 +74,12 @@ impl SimilarityStage {
                     tier: candidate.tier,
                 };
             }
-            // Tier didn't meet threshold, treat as unique but still insert
-            {
-                let mut index = self.index.lock().expect("Palantir index lock poisoned");
+            if let Ok(mut index) = self.index.lock() {
                 index.insert(hash, &signature);
             }
             SimilarityOutcome::Unique { hash, data }
         } else {
-            {
-                let mut index = self.index.lock().expect("Palantir index lock poisoned");
+            if let Ok(mut index) = self.index.lock() {
                 index.insert(hash, &signature);
             }
             SimilarityOutcome::Unique { hash, data }
@@ -86,6 +93,6 @@ impl SimilarityStage {
 
     #[must_use]
     pub fn index_size(&self) -> usize {
-        self.index.lock().expect("Palantir index lock poisoned").len()
+        self.index.lock().map_or(0, |guard| guard.len())
     }
 }

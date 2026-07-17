@@ -10,7 +10,9 @@ use crate::pipeline::dedup_stage::DedupStage;
 use crate::pipeline::hasher_stage::HasherStage;
 use crate::pipeline::similarity_stage::{SimilarityOutcome, SimilarityStage};
 use crate::similarity::SimilarityConfig;
+use crate::similarity::super_feature::extract_signature;
 use crate::store::ContentStore;
+use crate::store::delta::DeltaEncoder;
 use crate::types::{Chunk, ChunkConfig, Hash};
 
 use std::fs::File;
@@ -106,14 +108,50 @@ impl BackupPipeline {
         let writer_handle = {
             let store = self.store.clone();
             let index = self.index.clone();
+            let compression_level = self.config.compression_level;
             std::thread::spawn(move || -> Result<WriterOutput> {
                 let mut dedup_count = 0u64;
                 let mut stored_count = 0u64;
+                let mut delta_compressed_chunks = 0u64;
+                let mut delta_savings = 0u64;
+                let mut delta_fallbacks = 0u64;
                 for msg in writer_rx {
                     match msg {
-                        WriterMessage::Store { hash, data } | WriterMessage::StoreNearDuplicate { hash, data, .. } => {
+                        WriterMessage::Store { hash, data } => {
                             let loc = store.put(&hash, &data)?;
                             index.insert(hash, loc);
+                            if let Some(sig) = extract_signature(&data) {
+                                if let Ok(sig_bytes) = postcard::to_stdvec(&sig) {
+                                    let _ = store.put_signature(&hash, &sig_bytes);
+                                }
+                            }
+                            stored_count += 1;
+                        }
+                        WriterMessage::StoreNearDuplicate {
+                            hash, data, similar_to, ..
+                        } => {
+                            let encoder = DeltaEncoder::new(compression_level);
+                            if let Ok(base_data) = store.get(&similar_to) {
+                                if let Some(delta_data) = encoder.try_encode(&base_data, &data)? {
+                                    let loc = store.put_delta(&hash, &similar_to, &delta_data, data.len() as u32)?;
+                                    index.insert(hash, loc);
+                                    delta_compressed_chunks += 1;
+                                    delta_savings += data.len() as u64 - delta_data.len() as u64;
+                                } else {
+                                    let loc = store.put(&hash, &data)?;
+                                    index.insert(hash, loc);
+                                    delta_fallbacks += 1;
+                                }
+                            } else {
+                                let loc = store.put(&hash, &data)?;
+                                index.insert(hash, loc);
+                                delta_fallbacks += 1;
+                            }
+                            if let Some(sig) = extract_signature(&data) {
+                                if let Ok(sig_bytes) = postcard::to_stdvec(&sig) {
+                                    let _ = store.put_signature(&hash, &sig_bytes);
+                                }
+                            }
                             stored_count += 1;
                         }
                         WriterMessage::Skip { .. } => {
@@ -125,6 +163,9 @@ impl BackupPipeline {
                 Ok(WriterOutput {
                     dedup_count,
                     stored_count,
+                    delta_compressed_chunks,
+                    delta_savings,
+                    delta_fallbacks,
                 })
             })
         };
@@ -148,36 +189,26 @@ impl BackupPipeline {
 
             let is_dup = dedup_stage.check(&hash);
 
-            if is_dup {
-                let _ = writer_tx.send(WriterMessage::Skip { hash });
-                stats.dedup_size += chunk_len;
+            let send_result = if is_dup {
+                writer_tx.send(WriterMessage::Skip { hash })
             } else if let Some(ref similarity) = self.similarity {
-                // Run through similarity detection
                 match similarity.process(hash, chunk.data) {
                     SimilarityOutcome::Unique { hash, data } | SimilarityOutcome::TooSmall { hash, data } => {
-                        let _ = writer_tx.send(WriterMessage::Store { hash, data });
                         stats.stored_size += chunk_len;
+                        writer_tx.send(WriterMessage::Store { hash, data })
                     }
-                    SimilarityOutcome::NearDuplicate {
-                        hash,
-                        data,
-                        similar_to,
-                        tier,
-                    } => {
-                        let _ = writer_tx.send(WriterMessage::StoreNearDuplicate {
-                            hash,
-                            data,
-                            similar_to,
-                            tier,
-                        });
+                    SimilarityOutcome::NearDuplicate { hash, data, similar_to, tier } => {
                         stats.stored_size += chunk_len;
                         stats.near_duplicate_chunks += 1;
+                        writer_tx.send(WriterMessage::StoreNearDuplicate { hash, data, similar_to, tier })
                     }
                 }
             } else {
-                // Similarity detection disabled — store as-is
-                let _ = writer_tx.send(WriterMessage::Store { hash, data: chunk.data });
                 stats.stored_size += chunk_len;
+                writer_tx.send(WriterMessage::Store { hash, data: chunk.data })
+            };
+            if send_result.is_err() {
+                return Err(PacktError::Pipeline("writer thread exited prematurely".into()));
             }
         }
 
@@ -192,6 +223,9 @@ impl BackupPipeline {
         // Writer output is authoritative for counts (avoids double-counting)
         stats.dedup_chunks = writer_output.dedup_count;
         stats.unique_chunks = writer_output.stored_count;
+        stats.delta_compressed_chunks = writer_output.delta_compressed_chunks;
+        stats.delta_savings = writer_output.delta_savings;
+        stats.delta_fallbacks = writer_output.delta_fallbacks;
         stats.total_chunks = total_chunks;
         stats.chunk_hashes = chunk_hashes;
         stats.similarity_index_size = self
@@ -206,6 +240,12 @@ impl BackupPipeline {
     #[must_use]
     pub fn has_similarity(&self) -> bool {
         self.similarity.is_some()
+    }
+
+    /// Access the similarity stage (for injecting a pre-built index).
+    #[must_use]
+    pub fn similarity(&self) -> Option<&SimilarityStage> {
+        self.similarity.as_ref()
     }
 }
 
@@ -228,6 +268,9 @@ pub enum WriterMessage {
 struct WriterOutput {
     dedup_count: u64,
     stored_count: u64,
+    delta_compressed_chunks: u64,
+    delta_savings: u64,
+    delta_fallbacks: u64,
 }
 
 /// Statistics from a backup run.
@@ -241,6 +284,12 @@ pub struct BackupStats {
     pub dedup_chunks: u64,
     /// Number of near-duplicate chunks detected.
     pub near_duplicate_chunks: u64,
+    /// Number of near-duplicate chunks delta-compressed successfully.
+    pub delta_compressed_chunks: u64,
+    /// Bytes saved by delta compression (full_size - delta_size).
+    pub delta_savings: u64,
+    /// Number of near-duplicates where delta was not beneficial.
+    pub delta_fallbacks: u64,
     /// Number of entries in the similarity index.
     pub similarity_index_size: usize,
     /// Ordered list of chunk hashes for file reconstruction.
