@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-07-17
+
+### Added
+
+* **`packt list <store>`** -- List all backed up files with size and chunk count.
+  Enables API-based extraction without guessing file names.
+* **`packt restore <store> <dest> <file>`** -- Restore a single file by name without
+  decompressing the entire store. Omit the file name to restore all files.
+* **Incremental backup** -- `packt backup` now skips files that are unchanged since
+  the last backup (compares mtime + file size against stored manifest). Use `--force`
+  to re-backup regardless.
+* **Per-crate README files** -- Separate README.md for `packt-lib` (library users)
+  and `packt-cli` (CLI users), linked into docs.rs via `include_str!`.
+
+### Fixed
+
+* **Chunk hashes not saved in manifest** -- `stats.chunk_hashes` assignment was lost
+  during pipeline revert. Manifests now correctly record all chunk hashes for restoration.
+
+## [0.5.1] - 2026-07-17
+
+### Added
+
+* Per-crate README.md for packt-lib and packt-cli.
+* `readme` and `homepage` fields in Cargo.toml.
+* `#![doc = include_str!("../README.md")]` in lib.rs for docs.rs display.
+
 ## [0.5.0] - 2026-07-17
 
 ### Added (Phase 4a — Core Fixes + Production Hardening)
