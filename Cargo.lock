@@ -1525,6 +1525,7 @@ dependencies = [
  "packt-lib",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing-subscriber",
  "zstd",
 ]
