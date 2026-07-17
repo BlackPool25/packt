@@ -16,8 +16,10 @@ use crate::store::delta::DeltaEncoder;
 use crate::types::{Chunk, ChunkConfig, Hash};
 
 use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Configuration for the backup pipeline.
 pub struct PipelineConfig {
@@ -104,16 +106,27 @@ impl BackupPipeline {
             source: e,
         })?;
 
+        // Wrap in a large BufReader for efficient sequential readahead.
+        // The 256KB buffer ensures the kernel readahead keeps the pipeline fed,
+        // especially on HDDs and network filesystems where the default 8KB
+        // buffer causes frequent small reads.
+        let reader = BufReader::with_capacity(256 * 1024, file);
+
         // Stream chunks via fastcdc's StreamCDC — internal buffer = max_size
-        let chunker = fastcdc::v2020::StreamCDC::new(file, config.min_size, config.avg_size, config.max_size);
+        let chunker = fastcdc::v2020::StreamCDC::new(reader, config.min_size, config.avg_size, config.max_size);
 
         let (writer_tx, writer_rx): (crossbeam_channel::Sender<WriterMessage>, _) =
             crossbeam_channel::bounded(self.config.channel_capacity);
+
+        // Track in-flight chunk data bytes for peak memory reporting
+        let in_flight_bytes: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let peak_memory: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
 
         let writer_handle = {
             let store = self.store.clone();
             let index = self.index.clone();
             let compression_level = self.config.compression_level;
+            let in_flight = in_flight_bytes.clone();
             std::thread::spawn(move || -> Result<WriterOutput> {
                 let mut dedup_count = 0u64;
                 let mut stored_count = 0u64;
@@ -121,6 +134,14 @@ impl BackupPipeline {
                 let mut delta_savings = 0u64;
                 let mut delta_fallbacks = 0u64;
                 for msg in writer_rx {
+                    // Track memory: writer consumes data, decrement in-flight counter
+                    let data_len = match &msg {
+                        WriterMessage::Store { data, .. } | WriterMessage::StoreNearDuplicate { data, .. } => {
+                            data.len() as u64
+                        }
+                        WriterMessage::Skip { .. } => 0,
+                    };
+                    in_flight.fetch_sub(data_len, Ordering::Relaxed);
                     match msg {
                         WriterMessage::Store { hash, data } => {
                             let loc = store.put(&hash, &data)?;
@@ -188,17 +209,22 @@ impl BackupPipeline {
             };
             total_chunks += 1;
 
-            let chunk_len = u64::from(chunk.length);
             let hash = hasher_stage.hash(&chunk);
             chunk_hashes.push(hash);
 
+            // Track in-flight memory before sending to writer.
+            // Writer decrements when it finishes processing each message.
+            let data_len = u64::from(chunk.length);
             let send_result = if dedup_stage.check(&hash) {
                 writer_tx.send(WriterMessage::Skip { hash })
             } else if let Some(ref similarity) = self.similarity {
+                let chunk_data_len = chunk.data.len() as u64;
                 let chunk_data = chunk.data;
+                in_flight_bytes.fetch_add(chunk_data_len, Ordering::Relaxed);
+                peak_memory.fetch_max(in_flight_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
                 match similarity.process(hash, chunk_data) {
                     SimilarityOutcome::Unique { hash, data } | SimilarityOutcome::TooSmall { hash, data } => {
-                        stats.stored_size += chunk_len;
+                        stats.stored_size += data_len;
                         writer_tx.send(WriterMessage::Store { hash, data })
                     }
                     SimilarityOutcome::NearDuplicate {
@@ -207,7 +233,7 @@ impl BackupPipeline {
                         similar_to,
                         tier,
                     } => {
-                        stats.stored_size += chunk_len;
+                        stats.stored_size += data_len;
                         stats.near_duplicate_chunks += 1;
                         writer_tx.send(WriterMessage::StoreNearDuplicate {
                             hash,
@@ -218,7 +244,10 @@ impl BackupPipeline {
                     }
                 }
             } else {
-                stats.stored_size += chunk_len;
+                let cx_data_len = chunk.data.len() as u64;
+                in_flight_bytes.fetch_add(cx_data_len, Ordering::Relaxed);
+                peak_memory.fetch_max(in_flight_bytes.load(Ordering::Relaxed), Ordering::Relaxed);
+                stats.stored_size += data_len;
                 writer_tx.send(WriterMessage::Store { hash, data: chunk.data })
             };
             if send_result.is_err() {
@@ -246,6 +275,8 @@ impl BackupPipeline {
             .similarity
             .as_ref()
             .map_or(0, similarity_stage::SimilarityStage::index_size);
+
+        stats.peak_memory_bytes = peak_memory.load(Ordering::Relaxed);
 
         Ok(stats)
     }
@@ -308,6 +339,10 @@ pub struct BackupStats {
     pub similarity_index_size: usize,
     /// Ordered list of chunk hashes for file reconstruction.
     pub chunk_hashes: Vec<Hash>,
+    /// Approximate peak memory usage during backup (bytes).
+    /// Tracks in-flight chunk data in the channel. Does not include
+    /// index/store overhead. Set by the pipeline after completion.
+    pub peak_memory_bytes: u64,
 }
 
 impl BackupStats {
