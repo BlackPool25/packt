@@ -1,13 +1,17 @@
 pub mod dedup_stage;
 pub mod hasher_stage;
+pub mod similarity_stage;
+
 use crate::chunking::Chunker;
 use crate::error::{PacktError, Result};
 use crate::hash::ContentHasher;
 use crate::index::DedupIndex;
 use crate::pipeline::dedup_stage::DedupStage;
 use crate::pipeline::hasher_stage::HasherStage;
+use crate::pipeline::similarity_stage::{SimilarityOutcome, SimilarityStage};
+use crate::similarity::SimilarityConfig;
 use crate::store::ContentStore;
-use crate::types::{Chunk, ChunkConfig};
+use crate::types::{Chunk, ChunkConfig, Hash};
 
 use std::fs::File;
 use std::path::Path;
@@ -17,6 +21,7 @@ use std::sync::Arc;
 pub struct PipelineConfig {
     pub chunk_config: ChunkConfig,
     pub compression_level: i32,
+    pub similarity_config: Option<SimilarityConfig>,
 }
 
 impl Default for PipelineConfig {
@@ -24,6 +29,7 @@ impl Default for PipelineConfig {
         Self {
             chunk_config: ChunkConfig::default_32k(),
             compression_level: 3,
+            similarity_config: Some(SimilarityConfig::default()),
         }
     }
 }
@@ -35,6 +41,7 @@ pub struct BackupPipeline {
     hasher: Arc<dyn ContentHasher>,
     store: Arc<dyn ContentStore>,
     index: Arc<dyn DedupIndex>,
+    similarity: Option<SimilarityStage>,
 }
 
 impl BackupPipeline {
@@ -49,11 +56,13 @@ impl BackupPipeline {
         store: Arc<dyn ContentStore>,
         index: Arc<dyn DedupIndex>,
     ) -> Self {
+        let similarity = config.similarity_config.map(SimilarityStage::new);
         Self {
             config,
             hasher,
             store,
             index,
+            similarity,
         }
     }
 
@@ -67,6 +76,7 @@ impl BackupPipeline {
     /// # Errors
     /// Returns error if the file cannot be read, chunking fails, or the store
     /// encounters an I/O error.
+    #[allow(clippy::too_many_lines)]
     pub fn backup_file(&self, source: &Path) -> Result<BackupStats> {
         let hasher_stage = HasherStage::new(self.hasher.clone());
         let dedup_stage = DedupStage::new(self.index.clone(), self.store.clone());
@@ -91,7 +101,7 @@ impl BackupPipeline {
         // Stream chunks via fastcdc's StreamCDC — internal buffer = max_size
         let chunker = fastcdc::v2020::StreamCDC::new(file, config.min_size, config.avg_size, config.max_size);
 
-        let (dedup_tx, dedup_rx): (crossbeam_channel::Sender<DedupMessage>, _) = crossbeam_channel::bounded(64);
+        let (writer_tx, writer_rx): (crossbeam_channel::Sender<WriterMessage>, _) = crossbeam_channel::bounded(64);
 
         let writer_handle = {
             let store = self.store.clone();
@@ -99,14 +109,14 @@ impl BackupPipeline {
             std::thread::spawn(move || -> Result<WriterOutput> {
                 let mut dedup_count = 0u64;
                 let mut stored_count = 0u64;
-                for msg in dedup_rx {
+                for msg in writer_rx {
                     match msg {
-                        DedupMessage::NewChunk { hash, data } => {
+                        WriterMessage::Store { hash, data } | WriterMessage::StoreNearDuplicate { hash, data, .. } => {
                             let loc = store.put(&hash, &data)?;
                             index.insert(hash, loc);
                             stored_count += 1;
                         }
-                        DedupMessage::Duplicate { .. } => {
+                        WriterMessage::Skip { .. } => {
                             dedup_count += 1;
                         }
                     }
@@ -139,35 +149,80 @@ impl BackupPipeline {
             let is_dup = dedup_stage.check(&hash);
 
             if is_dup {
-                let _ = dedup_tx.send(DedupMessage::Duplicate { hash, pack_id: 0 });
+                let _ = writer_tx.send(WriterMessage::Skip { hash });
                 stats.dedup_size += chunk_len;
+            } else if let Some(ref similarity) = self.similarity {
+                // Run through similarity detection
+                match similarity.process(hash, chunk.data) {
+                    SimilarityOutcome::Unique { hash, data } | SimilarityOutcome::TooSmall { hash, data } => {
+                        let _ = writer_tx.send(WriterMessage::Store { hash, data });
+                        stats.stored_size += chunk_len;
+                    }
+                    SimilarityOutcome::NearDuplicate {
+                        hash,
+                        data,
+                        similar_to,
+                        tier,
+                    } => {
+                        let _ = writer_tx.send(WriterMessage::StoreNearDuplicate {
+                            hash,
+                            data,
+                            similar_to,
+                            tier,
+                        });
+                        stats.stored_size += chunk_len;
+                        stats.near_duplicate_chunks += 1;
+                    }
+                }
             } else {
-                let _ = dedup_tx.send(DedupMessage::NewChunk { hash, data: chunk.data });
+                // Similarity detection disabled — store as-is
+                let _ = writer_tx.send(WriterMessage::Store { hash, data: chunk.data });
                 stats.stored_size += chunk_len;
             }
         }
 
-        // Drop senders to signal end of stream
-        drop(dedup_tx);
+        // Drop sender to signal end of stream
+        drop(writer_tx);
 
         // Wait for writer
         let writer_output = writer_handle
             .join()
             .map_err(|e| PacktError::Pipeline(format!("Writer thread panicked: {e:?}")))??;
 
-        stats.unique_chunks = writer_output.stored_count;
+        // Writer output is authoritative for counts (avoids double-counting)
         stats.dedup_chunks = writer_output.dedup_count;
+        stats.unique_chunks = writer_output.stored_count;
         stats.total_chunks = total_chunks;
         stats.chunk_hashes = chunk_hashes;
+        stats.similarity_index_size = self
+            .similarity
+            .as_ref()
+            .map_or(0, similarity_stage::SimilarityStage::index_size);
 
         Ok(stats)
+    }
+
+    /// Return whether similarity detection is enabled.
+    #[must_use]
+    pub fn has_similarity(&self) -> bool {
+        self.similarity.is_some()
     }
 }
 
 /// Messages sent to the writer stage.
-pub enum DedupMessage {
-    NewChunk { hash: crate::types::Hash, data: Vec<u8> },
-    Duplicate { hash: crate::types::Hash, pack_id: u32 },
+#[derive(Debug)]
+pub enum WriterMessage {
+    /// Store a new unique chunk.
+    Store { hash: Hash, data: Vec<u8> },
+    /// Store a chunk that was detected as near-duplicate.
+    StoreNearDuplicate {
+        hash: Hash,
+        data: Vec<u8>,
+        similar_to: Hash,
+        tier: crate::similarity::palantir::SimilarityTier,
+    },
+    /// Chunk was an exact duplicate — skip storage.
+    Skip { hash: Hash },
 }
 
 struct WriterOutput {
@@ -184,12 +239,16 @@ pub struct BackupStats {
     pub total_chunks: u64,
     pub unique_chunks: u64,
     pub dedup_chunks: u64,
-    /// Ordered list of chunk hashes for file reconstruction
-    pub chunk_hashes: Vec<crate::types::Hash>,
+    /// Number of near-duplicate chunks detected.
+    pub near_duplicate_chunks: u64,
+    /// Number of entries in the similarity index.
+    pub similarity_index_size: usize,
+    /// Ordered list of chunk hashes for file reconstruction.
+    pub chunk_hashes: Vec<Hash>,
 }
 
 impl BackupStats {
-    /// Dedup ratio: source_size / stored_size
+    /// Dedup ratio: source_size / stored_size.
     #[must_use]
     pub fn dedup_ratio(&self) -> f64 {
         if self.stored_size == 0 {
@@ -198,12 +257,21 @@ impl BackupStats {
         self.source_size as f64 / self.stored_size as f64
     }
 
-    /// Space savings as percentage
+    /// Space savings as percentage.
     #[must_use]
     pub fn space_savings_pct(&self) -> f64 {
         if self.source_size == 0 {
             return 0.0;
         }
         (1.0 - self.stored_size as f64 / self.source_size as f64) * 100.0
+    }
+
+    /// Percentage of total chunks that are near-duplicates.
+    #[must_use]
+    pub fn near_dup_pct(&self) -> f64 {
+        if self.total_chunks == 0 {
+            return 0.0;
+        }
+        self.near_duplicate_chunks as f64 / self.total_chunks as f64 * 100.0
     }
 }

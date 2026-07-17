@@ -21,7 +21,10 @@ fn setup_backup_env(_corpus: &[u8]) -> (TempDir, BackupPipeline, Arc<LocalStore>
     let hasher = Arc::new(Blake3Hasher::new());
 
     let pipeline = BackupPipeline::new(
-        PipelineConfig::default(),
+        PipelineConfig {
+            similarity_config: None, // disable for baseline tests
+            ..PipelineConfig::default()
+        },
         chunker,
         hasher,
         store.clone() as Arc<dyn ContentStore>,
@@ -180,4 +183,96 @@ fn test_many_small_chunks_roundtrip() {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].hash, hash);
     }
+}
+
+// ── Similarity detection integration tests ──
+
+fn setup_backup_env_with_similarity(_corpus: &[u8], threshold: f64) -> (TempDir, BackupPipeline, Arc<LocalStore>) {
+    let store_dir = TempDir::new().unwrap();
+    let config = ChunkConfig::default_32k();
+    let store = Arc::new(LocalStore::open(store_dir.path()).unwrap());
+    let index = Arc::new(HashIndex::new(100_000));
+    let chunker = Arc::new(FastCdcChunker::new(config));
+    let hasher = Arc::new(Blake3Hasher::new());
+
+    let sim_config = if threshold > 0.0 {
+        Some(packt_lib::SimilarityConfig {
+            threshold,
+            ..packt_lib::SimilarityConfig::default()
+        })
+    } else {
+        None
+    };
+
+    let pipeline = BackupPipeline::new(
+        PipelineConfig {
+            similarity_config: sim_config,
+            ..PipelineConfig::default()
+        },
+        chunker,
+        hasher,
+        store.clone() as Arc<dyn ContentStore>,
+        index as Arc<dyn packt_lib::index::DedupIndex>,
+    );
+
+    (store_dir, pipeline, store)
+}
+
+#[test]
+fn test_similarity_pipeline_index_populated() {
+    let base: Vec<u8> = (0..300_000).map(|i| (i % 251) as u8).collect();
+    let mut modified = base.clone();
+    let preserve_boundary_until = 70_000;
+    for i in (preserve_boundary_until..base.len()).step_by(20) {
+        modified[i] = 0xFF;
+    }
+
+    let (store_dir, pipeline, store) = setup_backup_env_with_similarity(&base, 0.5);
+
+    let dir = TempDir::new().unwrap();
+    let f_base = dir.path().join("base.bin");
+    let f_mod = dir.path().join("modified.bin");
+    fs::write(&f_base, &base).unwrap();
+    fs::write(&f_mod, &modified).unwrap();
+
+    let stats1 = pipeline.backup_file(&f_base).unwrap();
+    assert!(stats1.unique_chunks > 0);
+
+    let stats2 = pipeline.backup_file(&f_mod).unwrap();
+    assert!(stats2.similarity_index_size > 0);
+
+    store.flush().unwrap();
+    let packs_dir = store_dir.path().join("packs");
+    let pack_count = fs::read_dir(&packs_dir).unwrap().count();
+    assert!(pack_count > 0);
+}
+
+#[test]
+fn test_similarity_zero_threshold_disables_detection() {
+    let data = vec![0xABu8; 100_000];
+    let (_store_dir, pipeline, _store) = setup_backup_env_with_similarity(&data, 0.0);
+
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("data.bin");
+    fs::write(&source, &data).unwrap();
+
+    let stats = pipeline.backup_file(&source).unwrap();
+    assert_eq!(stats.near_duplicate_chunks, 0);
+}
+
+#[test]
+fn test_similarity_stats_in_backup_output() {
+    let data = vec![0xABu8; 50_000];
+    let (_store_dir, pipeline, store) = setup_backup_env_with_similarity(&data, 0.7);
+
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("data.bin");
+    fs::write(&source, &data).unwrap();
+
+    let stats = pipeline.backup_file(&source).unwrap();
+    assert!(stats.similarity_index_size > 0);
+
+    let stats2 = pipeline.backup_file(&source).unwrap();
+    assert!(stats2.dedup_chunks > 0);
+    store.flush().unwrap();
 }

@@ -19,13 +19,16 @@ struct Cli {
 enum Commands {
     /// Create a deduplicated backup
     Backup {
-        /// Source file or directory to backup
+        /// Source file to backup
         source: PathBuf,
         /// Destination store directory
         destination: PathBuf,
         /// Average chunk size in bytes (default: 32768)
         #[arg(long, default_value_t = 32768)]
         chunk_size: usize,
+        /// Similarity detection threshold (0.0-1.0, default: 0.7). Set to 0 to disable.
+        #[arg(long, default_value_t = 0.7)]
+        similarity_threshold: f64,
     },
     /// Restore files from a backup
     Restore {
@@ -63,7 +66,8 @@ fn main() {
             source,
             destination,
             chunk_size,
-        } => backup::run_backup(source, destination, *chunk_size),
+            similarity_threshold,
+        } => backup::run_backup(source, destination, *chunk_size, *similarity_threshold),
         Commands::Restore { source, destination } => restore::run_restore(source, destination),
         Commands::Info { path } => info::run_info(path),
         Commands::Verify { path } => verify::run_verify(path),
