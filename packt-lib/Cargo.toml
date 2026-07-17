@@ -24,8 +24,15 @@ dashmap = "6"
 thiserror = "2"
 hex = "0.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Cloud storage backends via OpenDAL (optional, behind "cloud" feature)
+opendal = { version = "0.57", default-features = false, features = ["services-s3", "services-gcs", "blocking"], optional = true }
+lru = { version = "0.12", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
 # gdelta v0.2.1 has a decode bug (returns empty output) — disabled pending fix
 # gdelta = "0.2"
+
+[features]
+cloud = ["dep:opendal", "dep:lru", "dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"

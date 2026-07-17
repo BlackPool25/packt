@@ -2,6 +2,12 @@ pub mod delta;
 pub mod local;
 pub mod pack;
 
+#[cfg(feature = "cloud")]
+pub mod cloud;
+
+#[cfg(feature = "cloud")]
+pub use cloud::CloudStore;
+
 use crate::error::Result;
 use crate::types::{Hash, PackLocation};
 
