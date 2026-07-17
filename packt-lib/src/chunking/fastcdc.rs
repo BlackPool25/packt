@@ -50,6 +50,46 @@ impl Chunker for FastCdcChunker {
         chunks
     }
 
+    fn chunk_with_hints(&self, data: &[u8], hints: &[usize]) -> Vec<Chunk> {
+        if hints.is_empty() {
+            return self.chunk(data);
+        }
+        let source_len = data.len() as u64;
+        let fastcdc_chunker =
+            fastcdc::v2020::FastCDC::new(data, self.config.min_size, self.config.avg_size, self.config.max_size);
+        let mut chunks = Vec::new();
+        let mut last_end = 0u64;
+        let half_min = (self.config.min_size / 2) as u64;
+        for window in fastcdc_chunker {
+            let offset = window.offset as u64;
+            let mut length = window.length as u32;
+            let boundary = offset + u64::from(length);
+            let near_hint = hints.iter().find(|&&h| {
+                let h = h as u64;
+                h > boundary.saturating_sub(half_min) && h < boundary + half_min
+            });
+            if let Some(&hint) = near_hint {
+                let shifted_len = (hint as u64 - offset) as u32;
+                if shifted_len >= self.config.min_size as u32 && shifted_len <= self.config.max_size as u32 {
+                    length = shifted_len;
+                }
+            }
+            assert!(offset == last_end, "Chunk offset {offset} != expected {last_end}");
+            let chunk_data = data[offset as usize..(offset + u64::from(length)) as usize].to_vec();
+            chunks.push(Chunk {
+                offset,
+                length,
+                data: chunk_data,
+            });
+            last_end = offset + u64::from(length);
+        }
+        assert!(
+            last_end == source_len,
+            "Last chunk end {last_end} != source len {source_len}"
+        );
+        chunks
+    }
+
     fn config(&self) -> &ChunkConfig {
         &self.config
     }
