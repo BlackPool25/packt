@@ -32,11 +32,31 @@ pub enum PacktError {
 
     #[error("Similarity index error: {0}")]
     Similarity(String),
+
+    /// Cloud storage error (S3/GCS). Only available with the "cloud" feature.
+    #[cfg(feature = "cloud")]
+    #[error("Cloud storage error: {context}")]
+    Cloud {
+        context: String,
+        #[source]
+        source: opendal::Error,
+    },
 }
 
 impl From<std::io::Error> for PacktError {
     fn from(err: std::io::Error) -> Self {
         Self::Io {
+            context: err.to_string(),
+            source: err,
+        }
+    }
+}
+
+/// Convert OpenDAL errors into PacktError::Cloud.
+#[cfg(feature = "cloud")]
+impl From<opendal::Error> for PacktError {
+    fn from(err: opendal::Error) -> Self {
+        Self::Cloud {
             context: err.to_string(),
             source: err,
         }

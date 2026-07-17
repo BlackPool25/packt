@@ -102,8 +102,8 @@ pub fn run_restore(source: &Path, destination: &Path, file_name: Option<&str>) -
     for entry in &matching {
         let path = entry.path();
         let manifest_bytes = std::fs::read(&path)?;
-        let manifest_entry = parse_manifest(&manifest_bytes)
-            .with_context(|| format!("Failed to parse manifest: {}", path.display()))?;
+        let manifest_entry =
+            parse_manifest(&manifest_bytes).with_context(|| format!("Failed to parse manifest: {}", path.display()))?;
 
         let out_path = if manifest_entry.path.is_empty() {
             destination.join(path.file_stem().unwrap())
