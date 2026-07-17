@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0] - 2026-07-17
+
+### Added
+- **Palantir hierarchical super-feature similarity engine** (Phase 2)
+  - Replaces expensive MinHash+LSH (8s/200MB overhead → ~0ms)
+  - 12 fixed sub-chunk feature extraction with xxh3 sampling
+  - 3-tier matching: Tier 1 (≥95%), Tier 2 (≥85%), Tier 3 (≥70%)
+  - True LRU eviction with touch-on-access
+  - Best-match candidate ranking by super-feature count
+  - False-positive filter via head+tail xxh3 comparison
+  - 104 bytes per entry (vs 960 for MinHash)
+- **Pipeline integration**: SimilarityStage between DedupStage and WriterStage
+- **CLI**: `--similarity-threshold` flag (default 0.7). Set to 0 to disable.
+- **Backup stats**: Near-duplicate chunk count, similarity tier info
+- **Tests**: 23 new unit tests + 3 integration tests (70 total)
+- **scripts**: `phase2_similarity_test.sh` (Docker + synthetic), `compare_all.sh` (packt vs restic)
+- `xxhash-rust` dependency for fast non-crypto hashing
+
+### Changed
+- **DECISIONS.md**: Updated D004 (Palantir), added D016-D020, Phase 3 pack format spec
+- **Dependency**: `xxhash-rust` 0.8 added (removes need for MinHash crates)
+
+### Removed
+- `similarity/shingle.rs`, `minhash.rs`, `lsh.rs` — entire MinHash+LSH module replaced
+
 ## [0.3.0] - 2026-07-16
 
 ### Changed
