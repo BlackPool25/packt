@@ -12,18 +12,18 @@ categories = ["compression", "filesystem"]
 
 [dependencies]
 fastcdc = "4"
-blake3 = "1"
+blake3 = { version = "1", features = ["rayon"] }
 zstd = { version = "0.13" }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 rayon = "1"
 crossbeam-channel = "0.5"
 dashmap = "6"
-tracing = { version = "0.1", features = ["attributes"] }
 thiserror = "2"
-cfg-if = "1"
 hex = "0.4"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# gdelta v0.2.1 has a decode bug (returns empty output) — disabled pending fix
+# gdelta = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

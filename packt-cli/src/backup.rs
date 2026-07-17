@@ -63,9 +63,19 @@ pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshol
         },
         Arc::new(FastCdcChunker::new(cfg)),
         Arc::new(Blake3Hasher::new()),
-        store,
+        store.clone(),
         index.clone(),
     );
+
+    // Rebuild similarity index from stored signatures for cross-session near-dup detection
+    if let Some(sim_stage) = pipeline.similarity() {
+        use packt_lib::similarity::palantir::PalantirIndex;
+        let mut palantir = PalantirIndex::new(1_000_000);
+        if local_store.rebuild_similarity_index(&mut palantir).is_ok() {
+            sim_stage.set_index(palantir);
+        }
+    }
+
     let stats = pipeline.backup_file(source)?;
     let meta = std::fs::metadata(source)?;
     let name = source
@@ -91,14 +101,28 @@ pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshol
         serde_json::to_string_pretty(&entry)?,
     )?;
     println!(
-        "Backup: {} ({:.2}x ratio, {} chunks, {} near-dup)",
+        "Backup: {} ({:.2}x ratio, {} chunks, {} near-dup, {}B delta-savings)",
         source.display(),
         stats.dedup_ratio(),
         stats.total_chunks,
-        stats.near_duplicate_chunks
+        stats.near_duplicate_chunks,
+        stats.delta_savings,
     );
     if pipeline.has_similarity() {
         println!("  Sim index: {} entries", stats.similarity_index_size);
+    }
+    if stats.delta_compressed_chunks > 0 {
+        println!(
+            "  Delta: {} chunks ({} fallbacks), {} bytes saved ({:.1} avg)",
+            stats.delta_compressed_chunks,
+            stats.delta_fallbacks,
+            stats.delta_savings,
+            if stats.delta_compressed_chunks > 0 {
+                stats.delta_savings as f64 / stats.delta_compressed_chunks as f64
+            } else {
+                0.0
+            }
+        );
     }
     Ok(())
 }

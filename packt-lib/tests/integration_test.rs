@@ -177,9 +177,16 @@ fn test_many_small_chunks_roundtrip() {
         let data = vec![(i % 256) as u8; 1000];
         let hash = packt_lib::types::Hash::from_blake3(blake3::hash(&data));
         let len = data.len() as u32;
-        let chunks = vec![(hash, data.clone(), len)];
-        let pack = packt_lib::store::pack::write_pack(&chunks).unwrap();
-        let (entries, _) = packt_lib::store::pack::read_pack(&pack).unwrap();
+        use packt_lib::store::pack::{EntryType, PackEntry};
+        let entry = PackEntry {
+            hash,
+            data: data.clone(),
+            orig_length: len,
+            entry_type: EntryType::Full,
+            signature: None,
+        };
+        let pack = packt_lib::store::pack::write_pack(&[entry]).unwrap();
+        let (entries, _, _) = packt_lib::store::pack::read_pack(&pack).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].hash, hash);
     }
