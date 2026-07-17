@@ -47,6 +47,7 @@ pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshol
     let store: Arc<dyn ContentStore> = local_store.clone();
     let index: Arc<dyn DedupIndex> = Arc::new(HashIndex::new(1_000_000));
     local_store.populate_index(&index)?;
+    local_store.set_index(index.clone());
     let sim = if threshold > 0.0 {
         Some(SimilarityConfig {
             threshold: threshold.clamp(0.0, 1.0),
@@ -72,7 +73,7 @@ pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshol
         use packt_lib::similarity::palantir::PalantirIndex;
         let mut palantir = PalantirIndex::new(1_000_000);
         if local_store.rebuild_similarity_index(&mut palantir).is_ok() {
-            sim_stage.set_index(palantir);
+            sim_stage.rebuild_index(palantir.export_entries());
         }
     }
 
