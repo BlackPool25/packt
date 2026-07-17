@@ -1,12 +1,13 @@
 use crate::similarity::SimilarityConfig;
-use crate::similarity::palantir::{PalantirIndex, SimilarityTier};
+use crate::similarity::palantir::{ShardedPalantirIndex, SimilarityTier};
 use crate::similarity::super_feature::extract_signature;
 use crate::types::Hash;
-use std::sync::Mutex;
 
 /// Similarity detection stage using Palantir hierarchical super-features.
+///
+/// Internally sharded (4 shards by hash prefix) for concurrent access.
 pub struct SimilarityStage {
-    index: Mutex<PalantirIndex>,
+    index: ShardedPalantirIndex,
     config: SimilarityConfig,
 }
 
@@ -35,18 +36,22 @@ impl SimilarityStage {
     /// previously persisted signatures.
     #[must_use]
     pub fn new(config: SimilarityConfig) -> Self {
-        let index = PalantirIndex::new(config.memory_budget);
         Self {
-            index: Mutex::new(index),
+            index: ShardedPalantirIndex::new(config.memory_budget),
             config,
         }
     }
 
     /// Replace the index with a pre-built one (e.g., rebuilt from stored signatures).
-    pub fn set_index(&self, index: PalantirIndex) {
-        if let Ok(mut guard) = self.index.lock() {
-            *guard = index;
+    pub fn set_index(&self, index: &ShardedPalantirIndex) {
+        for (hash, sig) in index.export_entries() {
+            self.index.insert(hash, &sig);
         }
+    }
+
+    /// Replace the index by rebuilding from a sorted entry list.
+    pub fn rebuild_index(&self, entries: Vec<(Hash, crate::similarity::super_feature::ChunkSignature)>) {
+        self.index.rebuild(entries);
     }
 
     pub fn process(&self, hash: Hash, data: Vec<u8>) -> SimilarityOutcome {
@@ -54,11 +59,7 @@ impl SimilarityStage {
             return SimilarityOutcome::TooSmall { hash, data };
         };
 
-        let candidate = self
-            .index
-            .lock()
-            .ok()
-            .and_then(|mut index| index.query(&hash, &signature));
+        let candidate = self.index.query(&hash, &signature);
 
         if let Some(candidate) = candidate {
             let tier_ok = match candidate.tier {
@@ -74,14 +75,10 @@ impl SimilarityStage {
                     tier: candidate.tier,
                 };
             }
-            if let Ok(mut index) = self.index.lock() {
-                index.insert(hash, &signature);
-            }
+            self.index.insert(hash, &signature);
             SimilarityOutcome::Unique { hash, data }
         } else {
-            if let Ok(mut index) = self.index.lock() {
-                index.insert(hash, &signature);
-            }
+            self.index.insert(hash, &signature);
             SimilarityOutcome::Unique { hash, data }
         }
     }
@@ -93,6 +90,6 @@ impl SimilarityStage {
 
     #[must_use]
     pub fn index_size(&self) -> usize {
-        self.index.lock().map_or(0, |guard| guard.len())
+        self.index.len()
     }
 }
