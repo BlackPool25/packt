@@ -1,7 +1,25 @@
 use anyhow::{Context, Result};
 use packt_lib::store::{BackupOpts, Store};
+use serde::Serialize;
 
-pub fn run_migrate(source: &str, destination: &str) -> Result<()> {
+use crate::GlobalOpts;
+
+#[derive(Serialize)]
+struct FileProgress {
+    name: String,
+    chunks: u64,
+}
+
+#[derive(Serialize)]
+struct Output {
+    source: String,
+    destination: String,
+    total_files: usize,
+    total_bytes: u64,
+    files: Vec<FileProgress>,
+}
+
+pub fn run_migrate(source: &str, destination: &str, opts: &GlobalOpts) -> Result<()> {
     let src_config = Store::config_from_uri(source).context("Failed to parse source URI")?;
     let dst_config = Store::config_from_uri(destination).context("Failed to parse destination URI")?;
 
@@ -11,19 +29,22 @@ pub fn run_migrate(source: &str, destination: &str) -> Result<()> {
     let files = src.list_files().context("Failed to list source files")?;
 
     if files.is_empty() {
-        println!("No files to migrate.");
+        if !opts.quiet {
+            println!("No files to migrate.");
+        }
         return Ok(());
     }
 
-    // Use a temp directory for intermediate file reconstruction
     let tmp = tempfile::TempDir::new().context("Failed to create temp directory")?;
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
+    let mut progress: Vec<FileProgress> = Vec::new();
 
     for file in &files {
-        eprintln!("  Migrating: {} ...", file.name);
+        if !opts.quiet && !opts.json {
+            eprintln!("  Migrating: {} ...", file.name);
+        }
 
-        // Restore from source
         src.restore(tmp.path(), Some(&file.name))
             .with_context(|| format!("Failed to restore {}", file.name))?;
 
@@ -32,7 +53,6 @@ pub fn run_migrate(source: &str, destination: &str) -> Result<()> {
             anyhow::bail!("Restored file not found: {}", restored_path.display());
         }
 
-        // Backup to destination
         let stats = dst
             .backup(
                 &restored_path,
@@ -45,16 +65,28 @@ pub fn run_migrate(source: &str, destination: &str) -> Result<()> {
 
         total_files += 1;
         total_bytes += stats.source_size;
+        progress.push(FileProgress {
+            name: file.name.clone(),
+            chunks: stats.total_chunks,
+        });
 
-        // Clean up temp file
         std::fs::remove_file(&restored_path).ok();
-
-        eprintln!("    Done ({} chunks)", stats.total_chunks);
     }
 
-    println!("Migration complete: {total_files} files, {total_bytes} bytes");
-    println!("  Source:      {source}");
-    println!("  Destination: {destination}");
+    if opts.json {
+        let out = Output {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            total_files,
+            total_bytes,
+            files: progress,
+        };
+        println!("{}", serde_json::to_string(&out)?);
+    } else if !opts.quiet {
+        println!("Migration complete: {total_files} files, {total_bytes} bytes");
+        println!("  Source:      {source}");
+        println!("  Destination: {destination}");
+    }
 
     Ok(())
 }

@@ -8,11 +8,29 @@ mod migrate;
 mod restore;
 mod verify;
 
+/// Global CLI options shared across all commands.
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalOpts {
+    pub json: bool,
+    pub verbose: bool,
+    pub quiet: bool,
+}
+
 #[derive(Parser)]
 #[command(name = "packt")]
 #[command(about = "Content-defined chunking with exact dedup for binary data")]
 #[command(version, long_about = None)]
 struct Cli {
+    /// JSON output mode
+    #[arg(global = true, long, default_value_t = false)]
+    json: bool,
+    /// Verbose output
+    #[arg(global = true, short, long, default_value_t = false, conflicts_with = "quiet")]
+    verbose: bool,
+    /// Suppress non-error output
+    #[arg(global = true, short, long, default_value_t = false)]
+    quiet: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -74,11 +92,22 @@ enum Commands {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .init();
-
     let cli = Cli::parse();
+    let opts = GlobalOpts {
+        json: cli.json,
+        verbose: cli.verbose,
+        quiet: cli.quiet,
+    };
+
+    if !opts.verbose {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()))
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .init();
+    }
 
     let result = match &cli.command {
         Commands::Backup {
@@ -87,18 +116,20 @@ fn main() {
             chunk_size,
             similarity_threshold,
             force,
-        } => backup::run_backup(source, destination, chunk_size, *similarity_threshold, *force),
-        Commands::List { store } => list::run_list(store),
+        } => backup::run_backup(source, destination, chunk_size, *similarity_threshold, *force, &opts),
+        Commands::List { store } => list::run_list(store, &opts),
         Commands::Restore {
             source,
             destination,
             file,
-        } => restore::run_restore(source, destination, file.as_deref()),
-        Commands::Info { store } => info::run_info(store),
-        Commands::Verify { store } => verify::run_verify(store),
-        Commands::Migrate { source, destination } => migrate::run_migrate(source, destination),
+        } => restore::run_restore(source, destination, file.as_deref(), &opts),
+        Commands::Info { store } => info::run_info(store, &opts),
+        Commands::Verify { store } => verify::run_verify(store, &opts),
+        Commands::Migrate { source, destination } => migrate::run_migrate(source, destination, &opts),
         Commands::Benchmark { corpus } => {
-            println!("Benchmark not yet implemented for corpus: {}", corpus.display());
+            if !opts.quiet {
+                println!("Benchmark not yet implemented for corpus: {}", corpus.display());
+            }
             Ok(())
         }
     };
