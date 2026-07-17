@@ -104,7 +104,9 @@ impl CloudStore {
         let cache = cache_dir.as_ref().map(|dir| {
             let cache_packs = dir.join("packs");
             std::fs::create_dir_all(&cache_packs).ok();
-            Mutex::new(LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap()))
+            Mutex::new(LruCache::new(
+                NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).expect("DEFAULT_CACHE_CAPACITY is non-zero"),
+            ))
         });
 
         let store = Self {
@@ -316,19 +318,15 @@ impl CloudStore {
 
         // Check local cache first
         if let Some(ref cache) = self.cache {
-            let cache_pack_path = self
-                .cache_dir
-                .as_ref()
-                .unwrap()
-                .join("packs")
-                .join(format!("{pack_id:08}.pack"));
-            if cache_pack_path.exists() {
-                if let Ok(data) = std::fs::read(&cache_pack_path) {
-                    // Promote in LRU
-                    if let Ok(mut guard) = cache.lock() {
-                        guard.put(pack_id, ());
+            if let Some(ref dir) = self.cache_dir {
+                let cache_pack_path = dir.join("packs").join(format!("{pack_id:08}.pack"));
+                if cache_pack_path.exists() {
+                    if let Ok(data) = std::fs::read(&cache_pack_path) {
+                        if let Ok(mut guard) = cache.lock() {
+                            guard.put(pack_id, ());
+                        }
+                        return Ok((data, true));
                     }
-                    return Ok((data, true));
                 }
             }
         }
@@ -340,18 +338,18 @@ impl CloudStore {
         })?;
         let data = pack_buf.to_vec();
 
-        // Write to cache
+        // Write to cache, evicting oldest if at capacity
         if let Some(ref cache) = self.cache {
-            let cache_pack_path = self
-                .cache_dir
-                .as_ref()
-                .unwrap()
-                .join("packs")
-                .join(format!("{pack_id:08}.pack"));
-            if let Ok(mut guard) = cache.lock() {
-                guard.put(pack_id, ());
+            if let Some(ref dir) = self.cache_dir {
+                let cache_pack_path = dir.join("packs").join(format!("{pack_id:08}.pack"));
+                if let Ok(mut guard) = cache.lock() {
+                    if let Some((evicted_id, ())) = guard.push(pack_id, ()) {
+                        let evicted_path = dir.join("packs").join(format!("{evicted_id:08}.pack"));
+                        std::fs::remove_file(&evicted_path).ok();
+                    }
+                }
+                std::fs::write(&cache_pack_path, &data).ok();
             }
-            std::fs::write(&cache_pack_path, &data).ok();
         }
 
         Ok((data, false))
@@ -431,11 +429,22 @@ impl CloudStore {
             info
         };
 
-        let Some((loc, _base_hash, _needs_raw, _superblock)) = match_info else {
+        let Some((loc, base_hash, needs_raw, superblock)) = match_info else {
             return Err(PacktError::ChunkNotFound(hash.to_hex()));
         };
 
-        self.read_from_location(hash, loc, depth)
+        // Use extracted metadata directly instead of calling read_from_location
+        // (which would re-download the pack and re-parse all entries).
+        let (pack_data, _from_cache) = self.read_pack_cached(loc.pack_id)?;
+        self.extract_chunk(
+            hash,
+            &pack_data,
+            &loc,
+            base_hash,
+            needs_raw,
+            superblock.as_deref(),
+            depth,
+        )
     }
 
     /// Fast path: read chunk by PackLocation from index lookup.
@@ -558,7 +567,7 @@ impl ContentStore for CloudStore {
         });
         state.pending_size += data.len() as u64;
 
-        if state.pending_size >= self.pack_target_size {
+        let flush_pack_id = if state.pending_size >= self.pack_target_size {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state);
             let operator = self.operator.clone();
@@ -570,11 +579,18 @@ impl ContentStore for CloudStore {
                 .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("cloud store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
-            let _ = Self::write_meta_index(&state, &self.operator);
-        }
+            Self::write_meta_index(&state, &self.operator)?;
+            Some(pack_id)
+        } else {
+            None
+        };
 
+        let pack_id = match flush_pack_id {
+            Some(id) => id,
+            None => self.next_pack_id.load(Ordering::SeqCst),
+        };
         Ok(PackLocation {
-            pack_id: self.next_pack_id.load(Ordering::SeqCst),
+            pack_id,
             offset: 0,
             length: 0,
             orig_length,
@@ -610,7 +626,7 @@ impl ContentStore for CloudStore {
         });
         state.pending_size += delta_data.len() as u64;
 
-        if state.pending_size >= self.pack_target_size {
+        let flush_pack_id = if state.pending_size >= self.pack_target_size {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state);
             let operator = self.operator.clone();
@@ -622,11 +638,18 @@ impl ContentStore for CloudStore {
                 .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("cloud store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
-            let _ = Self::write_meta_index(&state, &self.operator);
-        }
+            Self::write_meta_index(&state, &self.operator)?;
+            Some(pack_id)
+        } else {
+            None
+        };
 
+        let pack_id = match flush_pack_id {
+            Some(id) => id,
+            None => self.next_pack_id.load(Ordering::SeqCst),
+        };
         Ok(PackLocation {
-            pack_id: self.next_pack_id.load(Ordering::SeqCst),
+            pack_id,
             offset: 0,
             length: 0,
             orig_length,
