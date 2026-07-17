@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-07-17
 
-### Added (Phase 4a — Core Fixes + Parallel Pipeline)
+### Added (Phase 4a — Core Fixes + Production Hardening)
 
 * **DedupIndex-backed `get()`** — `LocalStore::get()` now uses DedupIndex for O(1)
   chunk lookup instead of O(n) linear scan of all packs. Restore speed no longer
@@ -18,62 +18,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **PalantirIndex query limiting** — Candidates capped at 5 per super-feature
   match (max 65 candidates per query). Query time stays constant regardless of
   index size.
-* **Parallel pipeline (Rayon)** — Hashing, dedup check, and similarity detection
-  now run in parallel via `par_iter()` on batches of 32 chunks. Chunking and
-  writing remain sequential. Target: ≥1 GB/s on 8-core NVMe hardware.
-* **Progress callback mechanism** — `ProgressCallback` type (`Box<dyn Fn(ProgressInfo) + Send + Sync>`)
-  and `PipelineConfig::progress_callback`. Emits progress events (bytes/chunks/
-  dedups/near-dups) at least once per 32 chunks.
-* **Strengthened FPR filter** — Byte-frequency histogram comparison added as
-  second-stage filter (target: <1% false positive rate on Docker layers).
+* **`export_entries()` on PalantirIndex** — Enables rebuilding the sharded index
+  from a non-sharded source.
 * **Property tests** — Delta roundtrip (1000+ random cases), CDC determinism
   (1000+ random cases), pack roundtrip (random entries).
 * **Fuzz targets** — Pack reader no-panic test on arbitrary data, delta codec
   no-panic test on arbitrary data.
-* **`export_entries()` on PalantirIndex** — Enables rebuilding the sharded index
-  from a non-sharded source.
 
 ### Changed
 
-* **Pipeline architecture** — Two-phase batch processing: parallel hashing
-  (Rayon) followed by sequential dedup+similarity+write. Dedup must be
-  sequential because the index grows as chunks are stored; parallel dedup
-  within a batch sees stale index state. Hashing is parallelized because
-  BLAKE3 is CPU-bound.
 * **Store `put()` O(n) → O(1)** — Replaced linear scan over all pack entries
-  with DedupIndex lookup. Redundant check was O(n) per chunk, making the
-  writer thread O(n^2) overall.
+  with DedupIndex lookup. Same fix as `get()` — both were O(n) per operation,
+  making the writer thread O(n^2) overall.
+* **Store `contains()` O(n) → O(1)** — Same fix. Index checked first, pack
+  scan kept as fallback for safety.
 * **Incompressible data fast-path** — Quick entropy check (sample 1KB, count
-  unique byte values) skips zstd compression for random/incompressible data.
-  Prevents wasted CPU on zstd hash-table searches for random data.
+  unique byte values) skips zstd for random/incompressible data. Prevents
+  wasted CPU on zstd hash-table searches.
 * **Pipe-through verification** — Remove redundant read-back in pack flush.
-  `flush_write()` now verifies from the in-memory buffer instead of reading
-  the just-written file back from disk.
-* **zstd level 3 (was 7)** — Level 3 is 2-3x faster with <10% ratio loss.
-  Level 7 was over-optimized for the dedup use case.
+  `flush_write()` now verifies from the in-memory buffer instead of re-reading
+  the just-written file from disk.
+* **zstd level 3 (was 7)** — Level 3 is 2-3x faster with ~5% ratio loss.
+  Level 7 was over-optimized for the dedup use case where zstd only touches
+  unique chunks (typically 15-25% of data after dedup).
 * **zstdmt feature** — Multi-threaded zstd for super-block compression (4
-  workers). Speeds up large-pack flush on multi-core systems.
+  workers). Speeds up large-pack flush.
 * **SimilarityStage** — Now uses `ShardedPalantirIndex` internally. No external
   Mutex needed — sharding provides internal concurrency.
-* **PipelineConfig** — Added `progress_callback` field. `#[allow(dead_code)]`
-  removed from `config` field.
+* **`#[allow(dead_code)]` removed** from `config` field in `BackupPipeline`.
 * `cargo test` count: 73 → 78 tests (unit + integration + property + fuzz).
 
-### Performance (Phase 4a final, zstd level 1)
+### Removed
 
-| Workload | Before | After | Improvement |
+* **Parallel pipeline (Rayon par_iter)** — Measured no wall-time benefit.
+  BLAKE3 of 32KB takes ~2us per chunk. Even 60K chunks = 0.12s CPU total,
+  dwarfed by FastCDC chunking (1.4 GB/s, sequential) and zstd compression.
+  Pipeline restored to simple sequential loop.
+* **Progress callback** — Zero consumers. Speculative API. Add when a library
+  consumer needs it.
+* **FPR byte-frequency histogram** — Dead code. `check_similarity()` is
+  defined but never called from the pipeline. Similarity stage uses
+  `PalantirIndex.query()` directly.
+
+### Performance (v0.5.0, zstd level 3)
+
+| Workload | v0.4.0 (lvl7) | v0.5.0 (lvl3) | Change |
 |---|---|---|---|
-| 500MB zeros | ~250 MB/s | 1.9 GB/s | +660% |
-| 2GB random | ~225 MB/s | 291 MB/s | +29% |
-| Docker layers (5x, 363MB) | ~75 MB/s | 120 MB/s | +60% |
+| Docker layers (5x, 363MB) | ~70 MB/s (5.2s) | 118 MB/s (3.07s) | +69% |
+| 500MB zeros | ~833 MB/s | 1.66 GB/s | +100% |
+| 500MB random | ~227 MB/s | 249 MB/s | +10% |
+| 2GB random | ~232 MB/s | 262 MB/s | +13% |
 
-Parallel hashing helps CPU-bound workloads (zeros = many dedup hits, minimal
-compression). I/O-bound workloads (random data) bottleneck on file read +
-FastCDC chunking, which are inherently sequential. zstd level and entropy-pass
-optimizations help reduce compression CPU waste.
+Storage efficiency (Docker layers):
+  v0.4.0 (lvl7): 89MB stored, 4.1x ratio
+  v0.5.0 (lvl3): 90MB stored, 4.0x ratio
+  Difference: 1.1% (negligible for dedup workloads)
 
-The pipeline is now limited by sequential FastCDC chunking throughput
-(~1.4 GB/s). Further gains require MinCDC or parallel chunking (Phase 4b+).
+All improvements come from zstd level tuning, entropy-pass, and removing
+redundant I/O. The pipeline remains sequential — FastCDC chunking at 1.4 GB/s
+is the primary bottleneck for single-file processing.
 
 ### Added (Phase 3 — Delta Compression)
 
