@@ -9,6 +9,7 @@ use crate::store::ContentStore;
 use crate::store::local::LocalStore;
 use crate::types::{ChunkConfig, Hash};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -22,7 +23,7 @@ use opendal::services;
 
 /// Configuration for opening a content-addressed store.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum StoreConfig {
     /// Local filesystem store at the given path.
     Local { path: PathBuf },
@@ -43,6 +44,49 @@ pub enum StoreConfig {
         prefix: Option<String>,
         cache_dir: Option<PathBuf>,
     },
+}
+
+impl fmt::Debug for StoreConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local { path } => f.debug_struct("Local").field("path", path).finish(),
+            #[cfg(feature = "cloud")]
+            Self::S3 {
+                bucket,
+                region,
+                endpoint,
+                cache_dir,
+                ..
+            } => f
+                .debug_struct("S3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("endpoint", endpoint)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field("cache_dir", cache_dir)
+                .finish(),
+            #[cfg(feature = "cloud")]
+            Self::GCS {
+                bucket,
+                prefix,
+                cache_dir,
+            } => f
+                .debug_struct("GCS")
+                .field("bucket", bucket)
+                .field("prefix", prefix)
+                .field("cache_dir", cache_dir)
+                .finish(),
+        }
+    }
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self::Local {
+            path: PathBuf::from("packt-store"),
+        }
+    }
 }
 
 /// A file backed up in the store.
@@ -215,19 +259,48 @@ impl Store {
     pub fn config_from_uri(uri: &str) -> Result<StoreConfig> {
         if uri.starts_with("s3://") {
             let rest = uri.trim_start_matches("s3://");
-            let (bucket, _rest) = rest.split_once('/').unwrap_or((rest, ""));
-            let region: Option<String> = None;
+            // Split bucket/key from query params
+            let (path_part, query_part) = match rest.split_once('?') {
+                Some((p, q)) => (p, Some(q)),
+                None => (rest, None),
+            };
+            let (bucket, _key) = match path_part.split_once('/') {
+                Some((b, k)) => (b, k),
+                None => (path_part, ""),
+            };
+            // Parse query string
+            let query = query_part
+                .map(|q| {
+                    q.split('&')
+                        .filter_map(|pair| pair.split_once('='))
+                        .collect::<std::collections::HashMap<&str, &str>>()
+                })
+                .unwrap_or_default();
             Ok(StoreConfig::S3 {
                 bucket: bucket.to_string(),
-                region,
-                endpoint: None,
-                access_key_id: None,
-                secret_access_key: None,
-                cache_dir: None,
+                region: query.get("region").map(ToString::to_string),
+                endpoint: query.get("endpoint").map(ToString::to_string),
+                access_key_id: query.get("access_key_id").map(ToString::to_string),
+                secret_access_key: query.get("secret_access_key").map(ToString::to_string),
+                cache_dir: query.get("cache_dir").map(PathBuf::from),
             })
         } else if uri.starts_with("gcs://") {
             let rest = uri.trim_start_matches("gcs://");
-            let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+            let (path_part, query_part) = match rest.split_once('?') {
+                Some((p, q)) => (p, Some(q)),
+                None => (rest, None),
+            };
+            let (bucket, prefix) = match path_part.split_once('/') {
+                Some((b, p)) => (b, p),
+                None => (path_part, ""),
+            };
+            let query = query_part
+                .map(|q| {
+                    q.split('&')
+                        .filter_map(|pair| pair.split_once('='))
+                        .collect::<std::collections::HashMap<&str, &str>>()
+                })
+                .unwrap_or_default();
             Ok(StoreConfig::GCS {
                 bucket: bucket.to_string(),
                 prefix: if prefix.is_empty() {
@@ -235,7 +308,7 @@ impl Store {
                 } else {
                     Some(prefix.to_string())
                 },
-                cache_dir: None,
+                cache_dir: query.get("cache_dir").map(PathBuf::from),
             })
         } else {
             Ok(StoreConfig::Local {
@@ -519,7 +592,14 @@ impl Store {
             let out_path = if entry.path.is_empty() {
                 dest.join(name)
             } else {
-                dest.join(&entry.path)
+                let p = dest.join(&entry.path);
+                if !p.starts_with(dest) {
+                    return Err(PacktError::Config(format!(
+                        "path traversal detected in manifest entry: {}",
+                        entry.path
+                    )));
+                }
+                p
             };
 
             let mut file_data = Vec::new();

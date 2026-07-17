@@ -54,6 +54,15 @@ impl LocalStore {
         let packs_dir = root.join("packs");
         std::fs::create_dir_all(&packs_dir)?;
 
+        // Clean stale .tmp files from previous crashes
+        if let Ok(dir) = std::fs::read_dir(&packs_dir) {
+            for entry in dir.filter_map(std::result::Result::ok) {
+                if entry.path().extension().is_some_and(|ext| ext == "tmp") {
+                    std::fs::remove_file(entry.path()).ok();
+                }
+            }
+        }
+
         // Load existing pack files
         let mut packs = HashMap::new();
         let mut next_pack_id = 0u32;
