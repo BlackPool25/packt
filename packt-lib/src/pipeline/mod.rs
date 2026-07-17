@@ -235,6 +235,7 @@ impl BackupPipeline {
         stats.delta_savings = writer_output.delta_savings;
         stats.delta_fallbacks = writer_output.delta_fallbacks;
         stats.total_chunks = total_chunks;
+        stats.chunk_hashes = chunk_hashes;
         stats.similarity_index_size = self
             .similarity
             .as_ref()
