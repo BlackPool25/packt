@@ -1,9 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use packt_lib::chunking::fastcdc::FastCdcChunker;
 use packt_lib::hash::blake3_hasher::Blake3Hasher;
 use packt_lib::index::DedupIndex;
 use packt_lib::index::hashindex::HashIndex;
 use packt_lib::pipeline::{BackupPipeline, PipelineConfig};
+use packt_lib::similarity::SimilarityConfig;
 use packt_lib::store::ContentStore;
 use packt_lib::store::local::LocalStore;
 use packt_lib::types::ChunkConfig;
@@ -11,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-/// File metadata entry stored in backup manifests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub path: String,
@@ -21,102 +21,84 @@ pub struct ManifestEntry {
     pub chunk_hashes: Vec<String>,
 }
 
-/// Get Unix permission bits from file metadata, or 0 on non-Unix platforms.
 #[cfg(unix)]
-fn get_unix_permissions(metadata: &std::fs::Metadata) -> u32 {
+fn perm(m: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode()
+    m.permissions().mode()
 }
-
-/// Get Unix permission bits from file metadata, or 0 on non-Unix platforms.
 #[cfg(not(unix))]
-fn get_unix_permissions(_metadata: &std::fs::Metadata) -> u32 {
+fn perm(_: &std::fs::Metadata) -> u32 {
     0
 }
 
-pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize) -> Result<()> {
+pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshold: f64) -> Result<()> {
     if !source.exists() {
-        anyhow::bail!("Source path does not exist: {}", source.display());
+        anyhow::bail!("Source not found: {}", source.display());
     }
-
-    let config = ChunkConfig {
+    let cfg = ChunkConfig {
         min_size: (chunk_size / 2).max(64),
         avg_size: chunk_size,
         max_size: (chunk_size * 4).min(1_048_576),
     };
-
-    if !config.validate() {
-        anyhow::bail!("Invalid chunk configuration. Ensure min < avg < max and reasonable bounds.");
+    if !cfg.validate() {
+        anyhow::bail!("Invalid chunk config");
     }
-
-    eprintln!("Opening store at: {}", destination.display());
-    let store = Arc::new(LocalStore::open(destination).context("Failed to open local store")?);
-
+    let local_store = Arc::new(LocalStore::open(destination)?);
+    let store: Arc<dyn ContentStore> = local_store.clone();
     let index: Arc<dyn DedupIndex> = Arc::new(HashIndex::new(1_000_000));
-    store
-        .populate_index(&index)
-        .context("Failed to populate index from store")?;
-    let chunker = Arc::new(FastCdcChunker::new(config));
-    let hasher = Arc::new(Blake3Hasher::new());
-
-    let pipeline_config = PipelineConfig {
-        chunk_config: config,
-        ..Default::default()
+    local_store.populate_index(&index)?;
+    let sim = if threshold > 0.0 {
+        Some(SimilarityConfig {
+            threshold: threshold.clamp(0.0, 1.0),
+            ..Default::default()
+        })
+    } else {
+        None
     };
-
     let pipeline = BackupPipeline::new(
-        pipeline_config,
-        chunker,
-        hasher,
-        store as Arc<dyn ContentStore>,
+        PipelineConfig {
+            chunk_config: cfg,
+            similarity_config: sim,
+            ..Default::default()
+        },
+        Arc::new(FastCdcChunker::new(cfg)),
+        Arc::new(Blake3Hasher::new()),
+        store,
         index.clone(),
     );
-
-    let source_name = source
+    let stats = pipeline.backup_file(source)?;
+    let meta = std::fs::metadata(source)?;
+    let name = source
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let stats = pipeline.backup_file(source).context("Backup pipeline failed")?;
-
-    // Collect file metadata
-    let metadata = std::fs::metadata(source).context("Failed to read source metadata")?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs().to_string())
         .unwrap_or_default();
-
-    let permissions = get_unix_permissions(&metadata);
-
-    let manifest_entry = ManifestEntry {
-        path: source_name.clone(),
-        size: metadata.len(),
-        modified,
-        permissions,
+    let entry = ManifestEntry {
+        path: name,
+        size: meta.len(),
+        modified: meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_default(),
+        permissions: perm(&meta),
         chunk_hashes: stats.chunk_hashes.iter().map(|h| h.to_hex()).collect(),
     };
-
-    let manifests_dir = destination.join("manifests");
-    std::fs::create_dir_all(&manifests_dir).context("Failed to create manifests directory")?;
-    let manifest_path = manifests_dir.join(format!("{}.manifest", source_name));
-    let manifest_json = serde_json::to_string_pretty(&manifest_entry).context("Failed to serialize manifest")?;
-    std::fs::write(&manifest_path, &manifest_json).context("Failed to write manifest")?;
-
-    println!("Backup complete:");
-    println!("  File:            {}", source.display());
-    println!("  Source size:     {} bytes", stats.source_size);
-    println!("  Stored size:     {} bytes", stats.stored_size);
+    let md = destination.join("manifests");
+    std::fs::create_dir_all(&md)?;
+    std::fs::write(
+        md.join(format!("{}.manifest", source.file_name().unwrap().to_string_lossy())),
+        serde_json::to_string_pretty(&entry)?,
+    )?;
     println!(
-        "  Dedup saved:     {} bytes ({:.1}%)",
-        stats.dedup_size,
-        stats.space_savings_pct()
+        "Backup: {} ({:.2}x ratio, {} chunks, {} near-dup)",
+        source.display(),
+        stats.dedup_ratio(),
+        stats.total_chunks,
+        stats.near_duplicate_chunks
     );
-    println!("  Total chunks:    {}", stats.total_chunks);
-    println!("  Unique chunks:   {}", stats.unique_chunks);
-    println!("  Deduplicated:    {}", stats.dedup_chunks);
-    println!("  Dedup ratio:     {:.2}x", stats.dedup_ratio());
-
+    if pipeline.has_similarity() {
+        println!("  Sim index: {} entries", stats.similarity_index_size);
+    }
     Ok(())
 }
