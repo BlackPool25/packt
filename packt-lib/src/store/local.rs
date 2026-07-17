@@ -54,7 +54,10 @@ impl LocalStore {
         let packs_dir = root.join("packs");
         std::fs::create_dir_all(&packs_dir)?;
 
-        // Clean stale .tmp files from previous crashes
+        // Clean stale .tmp files from previous crashes (Unix only —
+        // Windows has file-lock semantics that can cause spurious
+        // "Access denied" errors in temp directories).
+        #[cfg(unix)]
         if let Ok(dir) = std::fs::read_dir(&packs_dir) {
             for entry in dir.filter_map(std::result::Result::ok) {
                 if entry.path().extension().is_some_and(|ext| ext == "tmp") {
