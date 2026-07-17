@@ -1,38 +1,20 @@
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{Context, Result};
+use packt_lib::store::Store;
 
-pub fn run_info(path: &Path) -> Result<()> {
-    if !path.exists() {
-        anyhow::bail!("Path does not exist: {}", path.display());
-    }
+pub fn run_info(store_uri: &str) -> Result<()> {
+    let config = Store::config_from_uri(store_uri).context("Failed to parse store URI")?;
+    let store = Store::open(config).context("Failed to open store")?;
 
-    let packs_dir = path.join("packs");
-    if !packs_dir.exists() {
-        println!("Store directory exists but contains no packs yet.");
-        println!("Path: {}", path.display());
-        return Ok(());
-    }
+    let info = store.info().context("Failed to get store info")?;
 
-    // Collect pack files in single pass
-    let pack_files: Vec<_> = std::fs::read_dir(&packs_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
-        .collect();
-    let pack_count = pack_files.len();
-
-    let total_pack_size: u64 = pack_files
-        .iter()
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
-        .sum();
-
-    println!("Store: {}", path.display());
-    println!("  Packs:        {} files", pack_count);
+    println!("Store: {store_uri}");
+    println!("  Files:          {}", info.file_count);
     println!(
-        "  Pack size:     {} bytes ({:.2} MB)",
-        total_pack_size,
-        total_pack_size as f64 / 1_048_576.0
+        "  Total size:     {} bytes ({:.2} MB)",
+        info.total_source_bytes,
+        info.total_source_bytes as f64 / 1_048_576.0
     );
+    println!("  Total chunks:   {}", info.total_chunks);
 
     Ok(())
 }
