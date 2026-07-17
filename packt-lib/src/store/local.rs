@@ -33,11 +33,14 @@ struct PendingEntry {
     hash: Hash,
     data: Vec<u8>,
     orig_length: u32,
+    entry_type: pack::EntryType,
+    signature: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
 struct PackMetadata {
     entries: Vec<IndexEntry>,
+    superblock: Option<Vec<u8>>,
 }
 
 impl LocalStore {
@@ -69,8 +72,8 @@ impl LocalStore {
                 let path = entry.path();
                 let data = std::fs::read(&path)?;
                 match pack::read_pack(&data) {
-                    Ok((entries, _checksum)) => {
-                        packs.insert(id, PackMetadata { entries });
+                    Ok((entries, _checksum, superblock)) => {
+                        packs.insert(id, PackMetadata { entries, superblock });
                         next_pack_id = id + 1;
                     }
                     Err(e) => {
@@ -95,18 +98,30 @@ impl LocalStore {
         })
     }
 
-    fn flush_pack(state: &mut StoreState, pack_id: u32, root: &Path) -> Result<()> {
+    /// Phase 1: drain pending chunks under the lock, return data for I/O.
+    fn flush_prepare(state: &mut StoreState, _pack_id: u32) -> Vec<pack::PackEntry> {
         let chunks: Vec<_> = state
             .pending_chunks
             .drain(..)
-            .map(|e| (e.hash, e.data, e.orig_length))
+            .map(|e| pack::PackEntry {
+                hash: e.hash,
+                data: e.data,
+                orig_length: e.orig_length,
+                entry_type: e.entry_type,
+                signature: e.signature,
+            })
             .collect();
+        state.pending_size = 0;
+        chunks
+    }
 
+    /// Phase 2: write pack to disk (no lock held).
+    fn flush_write(chunks: &[pack::PackEntry], pack_id: u32, root: &Path) -> Result<PackMetadata> {
         if chunks.is_empty() {
-            return Ok(());
+            return Ok(PackMetadata::default());
         }
 
-        let pack_bytes = pack::write_pack(&chunks)?;
+        let pack_bytes = pack::write_pack(chunks)?;
         let packs_dir = root.join("packs");
         let tmp_path = packs_dir.join(format!("{pack_id}.tmp"));
         let final_path = packs_dir.join(format!("{pack_id}.pack"));
@@ -115,7 +130,6 @@ impl LocalStore {
         let file = std::fs::File::open(&tmp_path)?;
         file.sync_all()?;
         drop(file);
-        // Atomic rename with retry for Windows (antivirus locking)
         let mut retries = 0;
         loop {
             match std::fs::rename(&tmp_path, &final_path) {
@@ -127,31 +141,26 @@ impl LocalStore {
                 Err(e) => return Err(e.into()),
             }
         }
-        // fsync the directory
         if let Ok(dir) = std::fs::File::open(&packs_dir) {
             dir.sync_all()?;
         }
 
-        // Re-read pack to get index
         let data = std::fs::read(&final_path)?;
         match pack::read_pack(&data) {
-            Ok((entries, _checksum)) => {
-                state.packs.insert(pack_id, PackMetadata { entries });
-            }
-            Err(e) => {
-                return Err(PacktError::StoreCorrupted(format!(
-                    "Just-written pack {} failed verification: {e}",
-                    final_path.display()
-                )));
-            }
+            Ok((entries, _checksum, superblock)) => Ok(PackMetadata { entries, superblock }),
+            Err(e) => Err(PacktError::StoreCorrupted(format!(
+                "Just-written pack {} failed verification: {e}",
+                final_path.display()
+            ))),
         }
-
-        state.pending_size = 0;
-        Ok(())
     }
 
+
     pub fn populate_index(&self, index: &Arc<dyn DedupIndex>) -> Result<()> {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
         for (&pack_id, pack) in &state.packs {
             for entry in &pack.entries {
                 let loc = PackLocation {
@@ -165,11 +174,127 @@ impl LocalStore {
         }
         Ok(())
     }
+
+    /// Rebuild a PalantirIndex from stored chunk signatures.
+    /// Iterates all pack entries with signatures and inserts them into the index.
+    pub fn rebuild_similarity_index(&self, index: &mut crate::similarity::palantir::PalantirIndex) -> Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+        let mut entries = Vec::new();
+        for pack in state.packs.values() {
+            for entry in &pack.entries {
+                if let Some(sig_bytes) = &entry.signature {
+                    if let Ok((sig, _)) =
+                        postcard::take_from_bytes::<crate::similarity::super_feature::ChunkSignature>(sig_bytes)
+                    {
+                        entries.push((entry.hash, sig));
+                    }
+                }
+            }
+        }
+        index.rebuild(entries);
+        Ok(())
+    }
+
+    fn get_inner(&self, hash: &Hash, depth: usize) -> Result<Vec<u8>> {
+        if depth > 16 {
+            return Err(PacktError::InvalidPackFormat(
+                "delta chain too deep (possible cycle)".into(),
+            ));
+        }
+
+        let match_info = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+
+            for entry in &state.pending_chunks {
+                if entry.hash == *hash {
+                    return Ok(entry.data.clone());
+                }
+            }
+
+            let mut info = None;
+            for (pack_id, pack) in &state.packs {
+                for entry in &pack.entries {
+                    if &entry.hash == hash {
+                        let pack_path = self.root.join("packs").join(format!("{pack_id}.pack"));
+                        let loc = PackLocation {
+                            pack_id: *pack_id,
+                            offset: entry.offset,
+                            length: entry.length,
+                            orig_length: entry.orig_length,
+                        };
+                        let (base_hash, needs_raw) = match &entry.entry_type {
+                            pack::EntryType::Delta { base_hash } => (Some(*base_hash), false),
+                            pack::EntryType::Full => (None, false),
+                            pack::EntryType::FullRaw => (None, true),
+                        };
+                        info = Some((pack_path, loc, base_hash, needs_raw, pack.superblock.clone()));
+                        break;
+                    }
+                }
+                if info.is_some() {
+                    break;
+                }
+            }
+            info
+        };
+
+        let Some((pack_path, loc, base_hash, needs_raw, superblock)) = match_info else {
+            return Err(PacktError::ChunkNotFound(hash.to_hex()));
+        };
+
+        let pack_data = std::fs::read(&pack_path)?;
+
+        let stored_data = if let Some(base_hash) = base_hash {
+            let base_chunk = self.get_inner(&base_hash, depth + 1)?;
+            pack::read_delta_chunk(&pack_data, &loc, &base_chunk)?
+        } else if let Some(ref sb) = superblock {
+            let start = loc.offset as usize;
+            let end = start + loc.length as usize;
+            if end > sb.len() {
+                return Err(PacktError::InvalidPackFormat(format!(
+                    "chunk {}+{} exceeds superblock size {}",
+                    loc.offset,
+                    loc.length,
+                    sb.len()
+                )));
+            }
+            let raw = &sb[start..end];
+            if needs_raw {
+                raw.to_vec()
+            } else {
+                zstd::bulk::decompress(raw, loc.orig_length as usize)
+                    .map_err(|e| PacktError::Serialization(format!("zstd decompress: {e}")))?
+            }
+        } else if needs_raw {
+            pack::read_raw_chunk(&pack_data, &loc)?
+        } else {
+            pack::read_chunk(&pack_data, &loc)?
+        };
+
+        let actual_hash = blake3::hash(&stored_data);
+        if Hash::from_blake3(actual_hash) != *hash {
+            return Err(PacktError::ChecksumMismatch {
+                expected: hash.to_hex(),
+                actual: Hash::from_blake3(actual_hash).to_hex(),
+            });
+        }
+
+        Ok(stored_data)
+    }
 }
 
 impl ContentStore for LocalStore {
     fn put(&self, hash: &Hash, data: &[u8]) -> Result<PackLocation> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
 
         for pack in state.packs.values() {
             for entry in &pack.entries {
@@ -186,7 +311,7 @@ impl ContentStore for LocalStore {
         for entry in &state.pending_chunks {
             if entry.hash == *hash {
                 return Ok(PackLocation {
-                    pack_id: self.next_pack_id.load(Ordering::Relaxed),
+                    pack_id: self.next_pack_id.load(Ordering::SeqCst),
                     offset: 0,
                     length: 0,
                     orig_length: entry.orig_length,
@@ -199,60 +324,110 @@ impl ContentStore for LocalStore {
             hash: *hash,
             data: data.to_vec(),
             orig_length,
+            entry_type: pack::EntryType::Full,
+            signature: None,
         });
         state.pending_size += data.len() as u64;
 
         if state.pending_size >= self.pack_target_size {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
-            Self::flush_pack(&mut state, pack_id, &self.root)?;
+            let chunks = Self::flush_prepare(&mut state, pack_id);
+            let root = self.root.clone();
+            drop(state);
+            let meta = Self::flush_write(&chunks, pack_id, &root)?;
+            let mut state = self.state.lock()
+                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+            state.packs.insert(pack_id, meta);
         }
 
         Ok(PackLocation {
-            pack_id: self.next_pack_id.load(Ordering::Relaxed),
+            pack_id: self.next_pack_id.load(Ordering::SeqCst),
             offset: 0,
             length: 0,
             orig_length,
         })
     }
 
-    fn get(&self, hash: &Hash) -> Result<Vec<u8>> {
-        let state = self.state.lock().unwrap();
+    fn put_delta(&self, hash: &Hash, base_hash: &Hash, delta_data: &[u8], orig_length: u32) -> Result<PackLocation> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
 
-        for entry in &state.pending_chunks {
-            if entry.hash == *hash {
-                return Ok(entry.data.clone());
-            }
-        }
-
-        for (pack_id, pack) in &state.packs {
+        for pack in state.packs.values() {
             for entry in &pack.entries {
                 if &entry.hash == hash {
-                    let pack_path = self.root.join("packs").join(format!("{pack_id}.pack"));
-                    let data = std::fs::read(&pack_path)?;
-                    let loc = PackLocation {
-                        pack_id: *pack_id,
+                    return Ok(PackLocation {
+                        pack_id: 0,
                         offset: entry.offset,
                         length: entry.length,
                         orig_length: entry.orig_length,
-                    };
-                    let stored_data = pack::read_chunk(&data, &loc)?;
-                    let actual_hash = blake3::hash(&stored_data);
-                    if Hash::from_blake3(actual_hash) != *hash {
-                        return Err(PacktError::ChecksumMismatch {
-                            expected: hash.to_hex(),
-                            actual: Hash::from_blake3(actual_hash).to_hex(),
-                        });
-                    }
-                    return Ok(stored_data);
+                    });
                 }
             }
         }
+        for entry in &state.pending_chunks {
+            if entry.hash == *hash {
+                return Ok(PackLocation {
+                    pack_id: self.next_pack_id.load(Ordering::SeqCst),
+                    offset: 0,
+                    length: 0,
+                    orig_length: entry.orig_length,
+                });
+            }
+        }
 
+        state.pending_chunks.push(PendingEntry {
+            hash: *hash,
+            data: delta_data.to_vec(),
+            orig_length,
+            entry_type: pack::EntryType::Delta { base_hash: *base_hash },
+            signature: None,
+        });
+        state.pending_size += delta_data.len() as u64;
+
+        if state.pending_size >= self.pack_target_size {
+            let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
+            let chunks = Self::flush_prepare(&mut state, pack_id);
+            let root = self.root.clone();
+            drop(state);
+            let meta = Self::flush_write(&chunks, pack_id, &root)?;
+            let mut state = self.state.lock()
+                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+            state.packs.insert(pack_id, meta);
+        }
+
+        Ok(PackLocation {
+            pack_id: self.next_pack_id.load(Ordering::SeqCst),
+            offset: 0,
+            length: 0,
+            orig_length,
+        })
+    }
+
+    fn put_signature(&self, hash: &Hash, signature: &[u8]) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+        for entry in &mut state.pending_chunks {
+            if entry.hash == *hash {
+                entry.signature = Some(signature.to_vec());
+                return Ok(());
+            }
+        }
         Err(PacktError::ChunkNotFound(hash.to_hex()))
     }
 
+    fn get(&self, hash: &Hash) -> Result<Vec<u8>> {
+        LocalStore::get_inner(self, hash, 0)
+    }
+
     fn contains(&self, hash: &Hash) -> Result<bool> {
-        let state = self.state.lock().unwrap();
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
 
         for entry in &state.pending_chunks {
             if entry.hash == *hash {
@@ -272,12 +447,23 @@ impl ContentStore for LocalStore {
     }
 
     fn flush(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        if !state.pending_chunks.is_empty() {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+                if !state.pending_chunks.is_empty() {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
-            Self::flush_pack(&mut state, pack_id, &self.root)?;
+            let chunks = Self::flush_prepare(&mut state, pack_id);
+            let root = self.root.clone();
+            drop(state);
+            let meta = Self::flush_write(&chunks, pack_id, &root)?;
+            let mut state = self.state.lock()
+                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+            state.packs.insert(pack_id, meta);
         }
         Ok(())
+
+
     }
 }
 
@@ -364,6 +550,55 @@ mod tests {
         let retrieved = store.get(&hash).unwrap();
         let verify = blake3::hash(&retrieved);
         assert_eq!(Hash::from_blake3(verify), hash);
+    }
+
+    #[test]
+    fn test_store_delta_roundtrip() {
+        let (_dir, store) = setup_store();
+        let base_data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+        let base_hash = Hash::from_blake3(blake3::hash(&base_data));
+        store.put(&base_hash, &base_data).unwrap();
+        store.flush().unwrap();
+
+        let mut target_data = base_data.clone();
+        target_data[100] = 0xFF;
+        let target_hash = Hash::from_blake3(blake3::hash(&target_data));
+
+        let encoder = crate::store::delta::DeltaEncoder::new(3);
+        let delta = encoder
+            .try_encode(&base_data, &target_data)
+            .unwrap()
+            .expect("delta should be beneficial for similar data");
+
+        let _loc = store
+            .put_delta(&target_hash, &base_hash, &delta, target_data.len() as u32)
+            .unwrap();
+        store.flush().unwrap();
+
+        let retrieved = store.get(&target_hash).unwrap();
+        assert_eq!(retrieved, target_data, "delta roundtrip should reconstruct original");
+    }
+
+    #[test]
+    fn test_store_delta_base_not_found() {
+        let (_dir, store) = setup_store();
+        let base_data: Vec<u8> = (0..512).map(|i| (i % 251) as u8).collect();
+        let mut data = base_data.clone();
+        data[100] = 0xFF; // small change like roundtrip test
+        let hash = Hash::from_blake3(blake3::hash(&data));
+        let fake_base = Hash::from_bytes([0u8; 32]);
+
+        let encoder = crate::store::delta::DeltaEncoder::new(3);
+        let delta = encoder
+            .try_encode(&base_data, &data)
+            .unwrap()
+            .expect("delta should work");
+
+        let _loc = store.put_delta(&hash, &fake_base, &delta, data.len() as u32).unwrap();
+        store.flush().unwrap();
+
+        let result = store.get(&hash);
+        assert!(result.is_err(), "should fail when base chunk is missing");
     }
 
     #[test]
