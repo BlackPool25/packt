@@ -4,20 +4,20 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 unmaintained = "workspace"
 ignore = [
     # OpenDAL transitive deps — we don't control these
-    { id = "RUSTSEC-2025-0024", reason = "quick-xml is transitive via opendal; XML parsing paths unused in packt" },
-    { id = "RUSTSEC-2025-0034", reason = "quick-xml is transitive via opendal; namespace parsing unused" },
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via opendal; packt never parses XML" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via opendal; packt never parses XML" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa via opendal signing (reqsign); packt has no RSA usage" },
+    { id = "RUSTSEC-2026-0002", reason = "lru IterMut soundness; low risk for cache-only usage" },
 ]
 
 [licenses]
 allow = [
     "MIT",
     "Apache-2.0",
-    "ISC",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
     "Unicode-3.0",
-    "0BSD",
     "BSL-1.0",
     "Unlicense",
     "Zlib",
