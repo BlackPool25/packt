@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 mod backup;
 mod info;
+mod list;
 mod restore;
 mod verify;
 
@@ -29,6 +30,14 @@ enum Commands {
         /// Similarity detection threshold (0.0-1.0, default: 0.7). Set to 0 to disable.
         #[arg(long, default_value_t = 0.7)]
         similarity_threshold: f64,
+        /// Force re-backup even if file is unchanged
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// List backed up files
+    List {
+        /// Path to the store directory
+        path: PathBuf,
     },
     /// Restore files from a backup
     Restore {
@@ -36,6 +45,8 @@ enum Commands {
         source: PathBuf,
         /// Destination path for restored data
         destination: PathBuf,
+        /// Optional file name to restore (restores all if omitted)
+        file: Option<String>,
     },
     /// Show information about a backup store
     Info {
@@ -67,8 +78,14 @@ fn main() {
             destination,
             chunk_size,
             similarity_threshold,
-        } => backup::run_backup(source, destination, *chunk_size, *similarity_threshold),
-        Commands::Restore { source, destination } => restore::run_restore(source, destination),
+            force,
+        } => backup::run_backup(source, destination, *chunk_size, *similarity_threshold, *force),
+        Commands::List { path } => list::run_list(path),
+        Commands::Restore {
+            source,
+            destination,
+            file,
+        } => restore::run_restore(source, destination, file.as_deref()),
         Commands::Info { path } => info::run_info(path),
         Commands::Verify { path } => verify::run_verify(path),
         Commands::Benchmark { corpus } => {

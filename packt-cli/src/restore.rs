@@ -45,7 +45,7 @@ fn set_unix_permissions(path: &Path, mode: u32) {
 #[cfg(not(unix))]
 fn set_unix_permissions(_path: &Path, _mode: u32) {}
 
-pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
+pub fn run_restore(source: &Path, destination: &Path, file_name: Option<&str>) -> Result<()> {
     if !source.exists() {
         anyhow::bail!("Store path does not exist: {}", source.display());
     }
@@ -60,55 +60,89 @@ pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
         anyhow::bail!("No manifests directory found. No files have been backed up with manifest tracking.");
     }
 
+    let mut manifest_files: Vec<_> = std::fs::read_dir(&manifests_dir)?
+        .filter_map(std::result::Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "manifest"))
+        .collect();
+    manifest_files.sort_by_key(|e| e.file_name());
+
+    // Filter by file name if specified.
+    let matching: Vec<_> = if let Some(name) = file_name {
+        manifest_files
+            .into_iter()
+            .filter(|e| {
+                let p = e.path();
+                let stem = p.file_stem().unwrap().to_string_lossy().to_string();
+                if stem == name {
+                    return true;
+                }
+                if let Ok(bytes) = std::fs::read(&p) {
+                    if let Ok(m) = serde_json::from_slice::<ManifestEntry>(&bytes) {
+                        return m.path == name;
+                    }
+                }
+                false
+            })
+            .collect()
+    } else {
+        manifest_files
+    };
+
+    if matching.is_empty() {
+        if let Some(name) = file_name {
+            anyhow::bail!("No manifest found for file: {name:?}");
+        }
+        eprintln!("No manifests found in store.");
+        return Ok(());
+    }
+
     let mut restored_count = 0u64;
     let mut total_bytes = 0u64;
 
-    for entry in std::fs::read_dir(&manifests_dir)? {
-        let entry = entry?;
+    for entry in &matching {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "manifest") {
-            let manifest_bytes = std::fs::read(&path)?;
-            let manifest_entry = parse_manifest(&manifest_bytes)
-                .with_context(|| format!("Failed to parse manifest: {}", path.display()))?;
+        let manifest_bytes = std::fs::read(&path)?;
+        let manifest_entry = parse_manifest(&manifest_bytes)
+            .with_context(|| format!("Failed to parse manifest: {}", path.display()))?;
 
-            // Determine output path: use stored path if available, else manifest file stem.
-            let out_path = if manifest_entry.path.is_empty() {
-                destination.join(path.file_stem().unwrap())
-            } else {
-                destination.join(&manifest_entry.path)
-            };
+        let out_path = if manifest_entry.path.is_empty() {
+            destination.join(path.file_stem().unwrap())
+        } else {
+            destination.join(&manifest_entry.path)
+        };
 
-            // Reconstruct the file from chunk hashes.
-            let mut file_data = Vec::new();
-            for hash_hex in &manifest_entry.chunk_hashes {
-                let hash = packt_lib::types::Hash::from_hex(hash_hex)
-                    .map_err(|e| anyhow::anyhow!("Invalid hash in manifest: {e}"))?;
-                let chunk_data = store
-                    .get(&hash)
-                    .with_context(|| format!("Failed to read chunk {hash_hex}"))?;
-                file_data.extend_from_slice(&chunk_data);
-            }
-
-            // Write reconstructed file.
-            std::fs::write(&out_path, &file_data)
-                .with_context(|| format!("Failed to write output: {}", out_path.display()))?;
-
-            // Restore metadata.
-            restore_metadata(&out_path, &manifest_entry);
-
-            restored_count += 1;
-            total_bytes += file_data.len() as u64;
-            eprintln!(
-                "  ✓ Restored {} ({} chunks, {} bytes)",
-                manifest_entry.path,
-                manifest_entry.chunk_hashes.len(),
-                file_data.len()
-            );
+        // Reconstruct the file from chunk hashes.
+        let mut file_data = Vec::new();
+        for hash_hex in &manifest_entry.chunk_hashes {
+            let hash = packt_lib::types::Hash::from_hex(hash_hex)
+                .map_err(|e| anyhow::anyhow!("Invalid hash in manifest: {e}"))?;
+            let chunk_data = store
+                .get(&hash)
+                .with_context(|| format!("Failed to read chunk {hash_hex}"))?;
+            file_data.extend_from_slice(&chunk_data);
         }
+
+        std::fs::write(&out_path, &file_data)
+            .with_context(|| format!("Failed to write output: {}", out_path.display()))?;
+
+        restore_metadata(&out_path, &manifest_entry);
+
+        restored_count += 1;
+        total_bytes += file_data.len() as u64;
+        eprintln!(
+            "  Restored {} ({} chunks, {} bytes)",
+            if manifest_entry.path.is_empty() {
+                path.file_stem().unwrap().to_string_lossy().to_string()
+            } else {
+                manifest_entry.path.clone()
+            },
+            manifest_entry.chunk_hashes.len(),
+            file_data.len()
+        );
     }
 
     if restored_count == 0 {
-        eprintln!("No manifests found in store.");
+        eprintln!("No files restored.");
         return Ok(());
     }
 
@@ -117,38 +151,34 @@ pub fn run_restore(source: &Path, destination: &Path) -> Result<()> {
         destination.display()
     );
 
-    // Verify reconstruction
-    for entry in std::fs::read_dir(&manifests_dir)? {
-        let entry = entry?;
+    // Verify reconstruction for restored files.
+    for entry in &matching {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "manifest") {
-            let manifest_bytes = std::fs::read(&path)?;
-            let manifest_entry = parse_manifest(&manifest_bytes)?;
-            let chunk_hashes = &manifest_entry.chunk_hashes;
+        let manifest_bytes = std::fs::read(&path)?;
+        let manifest_entry = parse_manifest(&manifest_bytes)?;
+        let chunk_hashes = &manifest_entry.chunk_hashes;
 
-            let out_path = if manifest_entry.path.is_empty() {
-                destination.join(path.file_stem().unwrap())
-            } else {
-                destination.join(&manifest_entry.path)
-            };
+        let out_path = if manifest_entry.path.is_empty() {
+            destination.join(path.file_stem().unwrap())
+        } else {
+            destination.join(&manifest_entry.path)
+        };
 
-            if out_path.exists() {
-                let data = std::fs::read(&out_path)?;
-                // Verify each chunk sequentially
-                let mut offset = 0u64;
-                for hash_hex in chunk_hashes {
-                    let hash = packt_lib::types::Hash::from_hex(hash_hex).unwrap();
-                    let chunk_data = store.get(&hash)?;
-                    let expected = &data[offset as usize..offset as usize + chunk_data.len()];
-                    if chunk_data != expected {
-                        anyhow::bail!(
-                            "INTEGRITY FAILURE: chunk {hash_hex} at offset {offset} does not match restored file!"
-                        );
-                    }
-                    offset += chunk_data.len() as u64;
+        if out_path.exists() {
+            let data = std::fs::read(&out_path)?;
+            let mut offset = 0u64;
+            for hash_hex in chunk_hashes {
+                let hash = packt_lib::types::Hash::from_hex(hash_hex).unwrap();
+                let chunk_data = store.get(&hash)?;
+                let expected = &data[offset as usize..offset as usize + chunk_data.len()];
+                if chunk_data != expected {
+                    anyhow::bail!(
+                        "INTEGRITY FAILURE: chunk {hash_hex} at offset {offset} does not match restored file!"
+                    );
                 }
-                eprintln!("  ✓ {} integrity verified", manifest_entry.path);
+                offset += chunk_data.len() as u64;
             }
+            eprintln!("  Verified integrity of restored file");
         }
     }
 

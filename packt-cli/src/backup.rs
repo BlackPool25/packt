@@ -31,10 +31,40 @@ fn perm(_: &std::fs::Metadata) -> u32 {
     0
 }
 
-pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshold: f64) -> Result<()> {
+fn is_file_unchanged(source: &Path, destination: &Path) -> Result<bool> {
+    let meta = std::fs::metadata(source)?;
+    let file_name = source.file_name().unwrap().to_string_lossy();
+    let manifest_path = destination.join("manifests").join(format!("{file_name}.manifest"));
+    if !manifest_path.exists() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(&manifest_path)?;
+    let Ok(entry) = serde_json::from_slice::<ManifestEntry>(&bytes) else {
+        return Ok(false);
+    };
+    if entry.size != meta.len() {
+        return Ok(false);
+    }
+    if let Ok(modified) = meta.modified() {
+        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+            if entry.modified == duration.as_secs().to_string() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub fn run_backup(source: &Path, destination: &Path, chunk_size: usize, threshold: f64, force: bool) -> Result<()> {
     if !source.exists() {
         anyhow::bail!("Source not found: {}", source.display());
     }
+
+    if !force && is_file_unchanged(source, destination)? {
+        println!("Unchanged: {} (skipped)", source.display());
+        return Ok(());
+    }
+
     let cfg = ChunkConfig {
         min_size: (chunk_size / 2).max(64),
         avg_size: chunk_size,
