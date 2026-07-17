@@ -8,6 +8,9 @@ pub mod cloud;
 #[cfg(feature = "cloud")]
 pub use cloud::CloudStore;
 
+pub mod store_api;
+pub use store_api::{FileInfo, Store, StoreConfig, StoreInfo, VerifyReport};
+
 use crate::error::Result;
 use crate::types::{Hash, PackLocation};
 

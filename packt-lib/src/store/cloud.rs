@@ -389,9 +389,13 @@ impl CloudStore {
         }
 
         // Phase 2: Try the dedup index for O(1) lookup.
+        // NOTE: If the index entry is stale (placeholder offset=0 after
+        // flush), fall through to linear scan instead of erroring.
         let loc = self.lookup_index(hash);
         if let Some(loc) = loc {
-            return self.read_from_location(hash, loc, depth);
+            if let Ok(data) = self.read_from_location(hash, loc, depth) {
+                return Ok(data);
+            }
         }
 
         // Phase 3: Fall back to linear scan of packs and pending.
