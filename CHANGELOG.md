@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-07-17
 
+### Added (Phase 4a — Core Fixes + Parallel Pipeline)
+
+* **DedupIndex-backed `get()`** — `LocalStore::get()` now uses DedupIndex for O(1)
+  chunk lookup instead of O(n) linear scan of all packs. Restore speed no longer
+  degrades as store grows. Index set via `LocalStore::set_index()`.
+* **Sharded PalantirIndex** — `ShardedPalantirIndex` with 4 hash-prefix shards
+  enables concurrent similarity queries without Mutex contention. Each shard has
+  its own LRU eviction and memory budget.
+* **PalantirIndex query limiting** — Candidates capped at 5 per super-feature
+  match (max 65 candidates per query). Query time stays constant regardless of
+  index size.
+* **Parallel pipeline (Rayon)** — Hashing, dedup check, and similarity detection
+  now run in parallel via `par_iter()` on batches of 32 chunks. Chunking and
+  writing remain sequential. Target: ≥1 GB/s on 8-core NVMe hardware.
+* **Progress callback mechanism** — `ProgressCallback` type (`Box<dyn Fn(ProgressInfo) + Send + Sync>`)
+  and `PipelineConfig::progress_callback`. Emits progress events (bytes/chunks/
+  dedups/near-dups) at least once per 32 chunks.
+* **Strengthened FPR filter** — Byte-frequency histogram comparison added as
+  second-stage filter (target: <1% false positive rate on Docker layers).
+* **Property tests** — Delta roundtrip (1000+ random cases), CDC determinism
+  (1000+ random cases), pack roundtrip (random entries).
+* **Fuzz targets** — Pack reader no-panic test on arbitrary data, delta codec
+  no-panic test on arbitrary data.
+* **`export_entries()` on PalantirIndex** — Enables rebuilding the sharded index
+  from a non-sharded source.
+
+### Changed
+
+* **Pipeline throughput** — Target ≥1 GB/s (was ~250 MB/s). Parallel batch
+  processing removes CPU-bound bottleneck.
+* **SimilarityStage** — Now uses `ShardedPalantirIndex` internally. No external
+  Mutex needed — sharding provides internal concurrency.
+* **PipelineConfig** — Added `progress_callback` field. `#[allow(dead_code)]`
+  removed from `config` field.
+* `cargo test` count: 73 → 78 tests (unit + integration + property + fuzz).
+
 ### Added (Phase 3 — Delta Compression)
 
 * **Pack format v3 (PACKv3)** — Super-block compression: Full/FullRaw chunk data

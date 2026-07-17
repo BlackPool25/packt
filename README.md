@@ -51,13 +51,16 @@ Benchmark methodology: real Docker layers, synthetic daily backups (5% daily chu
 ## Quick Start
 
 ```bash
-# Install from source
+# Install from crates.io (recommended)
+cargo install packt-cli
+
+# Or install from source
 git clone https://github.com/BlackPool25/packt.git
 cd packt/compressor
 cargo build --release -p packt-cli
 
 # Backup a file
-./target/release/packt backup ./myfile.big ./backup-store/
+packt backup ./myfile.big ./backup-store/
 
 # Show store statistics
 ./target/release/packt info ./backup-store/
@@ -92,13 +95,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-packt-lib = { git = "https://github.com/BlackPool25/packt" }
-```
-
-Or install from [crates.io](https://crates.io/crates/packt-lib):
-
-```bash
-cargo add packt-lib
+packt-lib = "0.5"
 ```
 
 ### Basic Backup
