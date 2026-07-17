@@ -5,6 +5,9 @@ unmaintained = "workspace"
 ignore = [
     { crate = "atomic-polyfill", reason = "transitive dep via heapless; not directly used" },
     { crate = "number_prefix", reason = "transitive dep via indicatif; not directly used" },
+    # OpenDAL transitive deps — we don't control these
+    { crate = "quick-xml", reason = "transitive via opendal services-s3/gcs; CVEs are in unused XML parsing paths" },
+    { crate = "quick-xml", id = "RUSTSEC-2025-0024", reason = "transitive via opendal; duplicate attribute allocation in unused path" },
 ]
 
 [licenses]
@@ -17,6 +20,10 @@ allow = [
     "CC0-1.0",
     "Unicode-3.0",
     "0BSD",
+    "BSL-1.0",
+    "Unlicense",
+    "Zlib",
+    "Apache-2.0 WITH LLVM-exception",
 ]
 confidence-threshold = 0.8
 
@@ -27,6 +34,8 @@ highlight = "all"
 deny = []
 skip-tree = [
     { crate = "windows-sys", reason = "foundational crate, multiple versions unavoidable across transitive deps" },
+    # OpenDAL brings a massive dep tree with unavoidable duplicate versions
+    { crate = "opendal", reason = "OpenDAL ecosystem — multiple versions of crypto/encoding crates from different providers" },
 ]
 
 [sources]
