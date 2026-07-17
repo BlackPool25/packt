@@ -18,6 +18,7 @@ pub struct LocalStore {
     state: Mutex<StoreState>,
     pack_target_size: u64,
     next_pack_id: AtomicU32,
+    index: Mutex<Option<Arc<dyn DedupIndex>>>,
 }
 
 struct StoreState {
@@ -95,6 +96,7 @@ impl LocalStore {
             }),
             pack_target_size: 16 * 1024 * 1024, // 16 MB default
             next_pack_id: AtomicU32::new(next_pack_id),
+            index: Mutex::new(None),
         })
     }
 
@@ -155,7 +157,6 @@ impl LocalStore {
         }
     }
 
-
     pub fn populate_index(&self, index: &Arc<dyn DedupIndex>) -> Result<()> {
         let state = self
             .state
@@ -173,6 +174,12 @@ impl LocalStore {
             }
         }
         Ok(())
+    }
+
+    pub fn set_index(&self, index: Arc<dyn DedupIndex>) {
+        if let Ok(mut guard) = self.index.lock() {
+            *guard = Some(index);
+        }
     }
 
     /// Rebuild a PalantirIndex from stored chunk signatures.
@@ -205,17 +212,34 @@ impl LocalStore {
             ));
         }
 
-        let match_info = {
+        // Phase 1: Check pending chunks first (always under lock, but pending is small).
+        {
             let state = self
                 .state
                 .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-
             for entry in &state.pending_chunks {
                 if entry.hash == *hash {
                     return Ok(entry.data.clone());
                 }
             }
+        }
+
+        // Phase 2: Try the dedup index for O(1) lookup (no state lock needed).
+        if let Ok(guard) = self.index.lock() {
+            if let Some(ref index) = *guard {
+                if let Some(loc) = index.lookup(hash) {
+                    return self.read_from_location(hash, loc, depth);
+                }
+            }
+        }
+
+        // Phase 3: Fall back to linear scan (for index misses / missing index).
+        let match_info = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
 
             let mut info = None;
             for (pack_id, pack) in &state.packs {
@@ -249,11 +273,74 @@ impl LocalStore {
         };
 
         let pack_data = std::fs::read(&pack_path)?;
+        self.read_chunk_data(
+            hash,
+            &pack_data,
+            &loc,
+            base_hash,
+            needs_raw,
+            superblock.as_deref(),
+            depth,
+        )
+    }
 
+    /// Fast path: read chunk directly by `PackLocation` from index lookup.
+    fn read_from_location(&self, hash: &Hash, loc: PackLocation, depth: usize) -> Result<Vec<u8>> {
+        let pack_path = self.root.join("packs").join(format!("{}.pack", loc.pack_id));
+
+        // Get the entry metadata for this location from the pack state.
+        let (base_hash, needs_raw, superblock) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+            let Some(pack) = state.packs.get(&loc.pack_id) else {
+                return Err(PacktError::ChunkNotFound(hash.to_hex()));
+            };
+            // Find the matching entry by offset (PackLocation offset is unique per pack).
+            let mut found = None;
+            for entry in &pack.entries {
+                if entry.offset == loc.offset && entry.length == loc.length {
+                    let (base_hash, needs_raw) = match &entry.entry_type {
+                        pack::EntryType::Delta { base_hash } => (Some(*base_hash), false),
+                        pack::EntryType::Full => (None, false),
+                        pack::EntryType::FullRaw => (None, true),
+                    };
+                    found = Some((base_hash, needs_raw, pack.superblock.clone()));
+                    break;
+                }
+            }
+            found.ok_or_else(|| PacktError::ChunkNotFound(hash.to_hex()))?
+        };
+
+        let pack_data = std::fs::read(&pack_path)?;
+        self.read_chunk_data(
+            hash,
+            &pack_data,
+            &loc,
+            base_hash,
+            needs_raw,
+            superblock.as_deref(),
+            depth,
+        )
+    }
+
+    /// Shared chunk data reader: decompress + verify checksum.
+    #[allow(clippy::too_many_arguments)]
+    fn read_chunk_data(
+        &self,
+        hash: &Hash,
+        pack_data: &[u8],
+        loc: &PackLocation,
+        base_hash: Option<Hash>,
+        needs_raw: bool,
+        superblock: Option<&[u8]>,
+        depth: usize,
+    ) -> Result<Vec<u8>> {
         let stored_data = if let Some(base_hash) = base_hash {
             let base_chunk = self.get_inner(&base_hash, depth + 1)?;
-            pack::read_delta_chunk(&pack_data, &loc, &base_chunk)?
-        } else if let Some(ref sb) = superblock {
+            pack::read_delta_chunk(pack_data, loc, &base_chunk)?
+        } else if let Some(sb) = superblock {
             let start = loc.offset as usize;
             let end = start + loc.length as usize;
             if end > sb.len() {
@@ -272,9 +359,9 @@ impl LocalStore {
                     .map_err(|e| PacktError::Serialization(format!("zstd decompress: {e}")))?
             }
         } else if needs_raw {
-            pack::read_raw_chunk(&pack_data, &loc)?
+            pack::read_raw_chunk(pack_data, loc)?
         } else {
-            pack::read_chunk(&pack_data, &loc)?
+            pack::read_chunk(pack_data, loc)?
         };
 
         let actual_hash = blake3::hash(&stored_data);
@@ -335,7 +422,9 @@ impl ContentStore for LocalStore {
             let root = self.root.clone();
             drop(state);
             let meta = Self::flush_write(&chunks, pack_id, &root)?;
-            let mut state = self.state.lock()
+            let mut state = self
+                .state
+                .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
         }
@@ -392,7 +481,9 @@ impl ContentStore for LocalStore {
             let root = self.root.clone();
             drop(state);
             let meta = Self::flush_write(&chunks, pack_id, &root)?;
-            let mut state = self.state.lock()
+            let mut state = self
+                .state
+                .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
         }
@@ -451,19 +542,19 @@ impl ContentStore for LocalStore {
             .state
             .lock()
             .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-                if !state.pending_chunks.is_empty() {
+        if !state.pending_chunks.is_empty() {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state, pack_id);
             let root = self.root.clone();
             drop(state);
             let meta = Self::flush_write(&chunks, pack_id, &root)?;
-            let mut state = self.state.lock()
+            let mut state = self
+                .state
+                .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
         }
         Ok(())
-
-
     }
 }
 
