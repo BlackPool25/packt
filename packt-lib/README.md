@@ -11,38 +11,69 @@
 [license-badge]: https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg
 [license-url]: https://github.com/BlackPool25/packt#license
 
-Content-defined chunking with exact dedup, near-duplicate detection, and zstd delta compression for binary data.
+Content-defined chunking with exact dedup, near-duplicate detection, zstd delta compression, and cloud storage support.
 
 ## Quick Start
 
+### Local Store (no optional deps)
+
 ```toml
 [dependencies]
-packt-lib = "0.5"
+packt-lib = "0.6"
 ```
 
 ```rust
-use std::sync::Arc;
-use packt_lib::chunking::fastcdc::FastCdcChunker;
-use packt_lib::hash::blake3_hasher::Blake3Hasher;
-use packt_lib::index::hashindex::HashIndex;
-use packt_lib::pipeline::{BackupPipeline, PipelineConfig};
-use packt_lib::store::local::LocalStore;
-use packt_lib::types::ChunkConfig;
+use packt_lib::store::{Store, StoreConfig, BackupOpts};
+use packt_lib::types::Hash;
 
-// Open a dedup store
-let store = Arc::new(LocalStore::open("./backup-store")?);
-let index = Arc::new(HashIndex::new(1_000_000));
-store.populate_index(&index)?;
+// Open a local store
+let store = Store::open(StoreConfig::Local {
+    path: "./backup-store".into(),
+})?;
 
-let pipeline = BackupPipeline::new(
-    PipelineConfig::default(),
-    Arc::new(FastCdcChunker::new(ChunkConfig::default_32k())),
-    Arc::new(Blake3Hasher::new()),
-    store,
-    index,
-);
-let stats = pipeline.backup_file("./myfile.big")?;
-println!("Dedup ratio: {:.2}x", stats.dedup_ratio());
+// Backup a file (dedup + compress + manifest)
+let stats = store.backup("myfile.big".as_ref(), &BackupOpts::default())?;
+println!("Ratio: {:.2}x", stats.dedup_ratio());
+
+// List backed-up files
+for file in store.list_files()? {
+    println!("  {} ({} chunks)", file.name, file.chunk_count);
+}
+
+// Restore a file
+store.restore("./restored".as_ref(), Some("myfile.big"))?;
+```
+
+### S3 / GCS Store (enable `cloud` feature)
+
+```toml
+[dependencies]
+packt-lib = { version = "0.6", features = ["cloud"] }
+```
+
+```rust
+use packt_lib::store::{Store, StoreConfig};
+
+// S3
+let store = Store::open(StoreConfig::S3 {
+    bucket: "my-backups".into(),
+    region: Some("us-east-1".into()),
+    endpoint: None,
+    access_key_id: None,
+    secret_access_key: None,
+    cache_dir: Some("./cache".into()),
+})?;
+
+// GCS
+let store = Store::open(StoreConfig::GCS {
+    bucket: "my-backups".into(),
+    prefix: Some("servers/".into()),
+    cache_dir: Some("./cache".into()),
+})?;
+
+// URI shortcut (available in CLI, also works in library)
+let config = Store::config_from_uri("s3://my-backups/servers/?region=us-east-1")?;
+let store = Store::open(config)?;
 ```
 
 ## Features
@@ -51,6 +82,8 @@ println!("Dedup ratio: {:.2}x", stats.dedup_ratio());
 - **Exact Dedup** -- BLAKE3 content addressing with concurrent DashMap index and Bloom filter.
 - **Near-Duplicate Detection** -- Palantir 3-tier hierarchical super-features (~0 ms overhead).
 - **Delta Compression** -- zstd dictionary mode for similar chunks with automatic fallback.
+- **Cloud Storage** -- S3 and GCS via OpenDAL (`cloud` feature). Optional local LRU cache.
+- **High-Level Store API** -- `Store::open/backup/restore/list/info/verify/delete/hasFile`.
 - **Integrity Verification** -- BLAKE3 checksums on every chunk, verified on read.
 - **Cross-Session Dedup** -- Similarity signatures persisted in pack format, index rebuilt on open.
 
