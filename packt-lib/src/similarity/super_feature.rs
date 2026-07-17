@@ -17,7 +17,7 @@
 ///   Tier 1 (>=95%): 3 SFs x 4 features
 ///   Tier 2 (>=85%): 4 SFs x 3 features
 ///   Tier 3 (>=70%): 6 SFs x 2 features
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkSignature {
     pub tier1: [u64; 3],
     pub tier2: [u64; 4],
@@ -27,6 +27,8 @@ pub struct ChunkSignature {
 const NUM_FEATURES: usize = 12;
 const SAMPLE_BYTES: usize = 32;
 const SMALL_CHUNK_THRESHOLD: usize = 256;
+
+use serde::{Deserialize, Serialize};
 
 pub fn extract_signature(data: &[u8]) -> Option<ChunkSignature> {
     if data.len() < 64 {

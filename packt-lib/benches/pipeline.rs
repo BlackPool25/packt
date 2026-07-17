@@ -3,7 +3,7 @@ use packt_lib::chunking::Chunker;
 use packt_lib::chunking::fastcdc::FastCdcChunker;
 use packt_lib::hash::ContentHasher;
 use packt_lib::hash::blake3_hasher::Blake3Hasher;
-use packt_lib::store::pack::{read_pack, write_pack};
+use packt_lib::store::pack::{EntryType, PackEntry, read_pack, write_pack};
 use packt_lib::types::{ChunkConfig, Hash};
 
 /// Benchmark FastCDC chunking throughput on 64 MB of zeroed data at default
@@ -48,13 +48,19 @@ fn hashing_throughput(c: &mut Criterion) {
 /// Benchmark pack round-trip: serialise 1000 synthetic chunks into a pack,
 /// then deserialise and verify the index.
 fn pack_roundtrip(c: &mut Criterion) {
-    let chunks: Vec<(Hash, Vec<u8>, u32)> = (0..1000)
+    let chunks: Vec<PackEntry> = (0..1000)
         .map(|i| {
             let data = format!("benchmark pack chunk {i} with some extra data for realistic sizing");
             let len = data.len() as u32;
             let data_bytes = data.into_bytes();
             let hash = Hash::from_blake3(blake3::hash(&data_bytes));
-            (hash, data_bytes, len)
+            PackEntry {
+                hash,
+                data: data_bytes,
+                orig_length: len,
+                entry_type: EntryType::Full,
+                signature: None,
+            }
         })
         .collect();
 
@@ -63,7 +69,7 @@ fn pack_roundtrip(c: &mut Criterion) {
     group.bench_function("roundtrip_1000", |b| {
         b.iter(|| {
             let pack = write_pack(black_box(&chunks)).unwrap();
-            let (entries, _) = read_pack(black_box(&pack)).unwrap();
+            let (entries, _, _) = read_pack(black_box(&pack)).unwrap();
             black_box(entries.len());
         });
     });

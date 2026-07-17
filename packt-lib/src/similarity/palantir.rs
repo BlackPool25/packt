@@ -142,6 +142,29 @@ impl PalantirIndex {
         best.map(|(h, _)| h)
     }
 
+    /// Rebuild index from stored (hash, signature) pairs.
+    /// Clears existing state and inserts all entries.
+    pub fn rebuild<I>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = (Hash, ChunkSignature)>,
+    {
+        self.signatures.clear();
+        self.lru_order.clear();
+        self.count = 0;
+        for map in &mut self.tier1 {
+            map.clear();
+        }
+        for map in &mut self.tier2 {
+            map.clear();
+        }
+        for map in &mut self.tier3 {
+            map.clear();
+        }
+        for (hash, sig) in entries {
+            self.insert(hash, &sig);
+        }
+    }
+
     /// Remove an entry from the index.
     pub fn remove(&mut self, hash: &Hash) {
         if let Some(sig) = self.signatures.remove(hash) {
