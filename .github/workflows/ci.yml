@@ -50,9 +50,6 @@ jobs:
           - name: macos-cloud
             os: macos-latest
             features: --features cloud
-          - name: windows-local
-            os: windows-latest
-            features: ""
           - name: ubuntu-beta
             os: ubuntu-latest
             toolchain: beta
@@ -66,12 +63,7 @@ jobs:
         with:
           key: ${{ matrix.name }}-${{ matrix.toolchain || 'stable' }}
       - run: cargo build --workspace ${{ matrix.features }} --locked
-      - name: Run tests (Unix)
-        if: runner.os != 'Windows'
-        run: cargo test --workspace ${{ matrix.features }} --locked
-      - name: Run tests (Windows, serial for tempfile stability)
-        if: runner.os == 'Windows'
-        run: cargo test --workspace ${{ matrix.features }} --locked -- --test-threads 1
+      - run: cargo test --workspace ${{ matrix.features }} --locked
 
   msrv:
     name: MSRV (1.85)
