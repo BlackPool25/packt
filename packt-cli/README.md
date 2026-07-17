@@ -19,11 +19,17 @@ cargo install packt-cli
 ## Usage
 
 ```bash
-# Backup a file
+# Backup a file (incremental -- skips if unchanged since last backup)
 packt backup ./myfile.big ./backup-store/
+
+# Force re-backup even if unchanged
+packt backup --force ./myfile.big ./backup-store/
 
 # Enable near-duplicate detection and delta compression
 packt backup --similarity-threshold 0.7 ./myfile.big ./backup-store/
+
+# List all backed up files
+packt list ./backup-store/
 
 # Show store statistics
 packt info ./backup-store/
@@ -31,15 +37,19 @@ packt info ./backup-store/
 # Verify all pack integrity
 packt verify ./backup-store/
 
-# Restore files
+# Restore all files
 packt restore ./backup-store/ ./restored/
+
+# Restore a single file by name
+packt restore ./backup-store/ ./restored/ myfile.big
 ```
 
 ### Options
 
 ```
---chunk-size <BYTES>         Average chunk size (default: 32768).
---similarity-threshold <0-1> Near-dup detection threshold (default: 0.7, 0 = disable).
+--chunk-size <BYTES>               Average chunk size (default: 32768).
+--similarity-threshold <0-1>       Near-dup detection threshold (default: 0.7, 0 = disable).
+--force                            Force re-backup even if file unchanged.
 ```
 
 ## Library
