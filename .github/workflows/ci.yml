@@ -65,13 +65,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}-${{ matrix.toolchain || 'stable' }}
-      - run: cargo build --workspace ${{ matrix.features }}
+      - run: cargo build --workspace ${{ matrix.features }} --locked
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
-        run: cargo test --workspace ${{ matrix.features }}
+        run: cargo test --workspace ${{ matrix.features }} --locked
       - name: Run tests (Windows, serial for tempfile stability)
         if: runner.os == 'Windows'
-        run: cargo test --workspace ${{ matrix.features }} -- --test-threads 1
+        run: cargo test --workspace ${{ matrix.features }} --locked -- --test-threads 1
 
   msrv:
     name: MSRV (1.85)
