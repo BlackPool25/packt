@@ -1,6 +1,10 @@
 use crate::similarity::super_feature::ChunkSignature;
 use crate::types::Hash;
 use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+
+/// Number of shards for the sharded Palantir index.
+const NUM_SHARDS: usize = 4;
 
 /// Tier of similarity detection (from Palantir hierarchical matching).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,7 +104,12 @@ impl PalantirIndex {
         }
     }
 
+    /// Maximum candidates examined per super-feature match.
+    const MAX_CANDIDATES_PER_SF: usize = 5;
+
     /// Query a single tier, returning best match (highest SF match count).
+    /// Caps candidate accumulation at `MAX_CANDIDATES_PER_SF` per SF match
+    /// to keep query time constant regardless of index size.
     fn query_tier<const N: usize>(
         &self,
         query_hash: &Hash,
@@ -112,7 +121,7 @@ impl PalantirIndex {
 
         for (i, sf) in sfs.iter().enumerate() {
             if let Some(entries) = tier_maps[i].get(sf) {
-                for &entry_hash in entries {
+                for &entry_hash in entries.iter().take(Self::MAX_CANDIDATES_PER_SF) {
                     if entry_hash == *query_hash {
                         continue;
                     }
@@ -195,6 +204,11 @@ impl PalantirIndex {
         self.count == 0
     }
 
+    /// Export all entries for redistribution (e.g., into a ShardedPalantirIndex).
+    pub fn export_entries(&self) -> Vec<(Hash, ChunkSignature)> {
+        self.signatures.iter().map(|(hash, sig)| (*hash, sig.clone())).collect()
+    }
+
     fn enforce_budget(&mut self) {
         while self.count > 0 && self.count >= self.memory_budget {
             if let Some(oldest) = self.lru_order.pop_front() {
@@ -203,6 +217,87 @@ impl PalantirIndex {
                 break;
             }
         }
+    }
+}
+
+/// Thread-safe wrapper around 4 sharded `PalantirIndex` instances.
+///
+/// Each shard is locked independently so concurrent queries/inserts
+/// for different hash prefixes do not block each other.
+pub struct ShardedPalantirIndex {
+    shards: [Mutex<PalantirIndex>; NUM_SHARDS],
+}
+
+impl ShardedPalantirIndex {
+    /// Create a sharded index with `total_budget` divided across shards.
+    pub fn new(total_budget: usize) -> Self {
+        let per_shard = total_budget / NUM_SHARDS;
+        Self {
+            shards: [
+                Mutex::new(PalantirIndex::new(per_shard)),
+                Mutex::new(PalantirIndex::new(per_shard)),
+                Mutex::new(PalantirIndex::new(per_shard)),
+                Mutex::new(PalantirIndex::new(per_shard)),
+            ],
+        }
+    }
+
+    fn shard_id(hash: &Hash) -> usize {
+        hash.0[0] as usize % NUM_SHARDS
+    }
+
+    /// Query for a similar chunk in the relevant shard.
+    pub fn query(&self, hash: &Hash, signature: &ChunkSignature) -> Option<MatchCandidate> {
+        let sid = Self::shard_id(hash);
+        self.shards[sid]
+            .lock()
+            .ok()
+            .and_then(|mut index| index.query(hash, signature))
+    }
+
+    /// Insert a chunk signature into the relevant shard.
+    pub fn insert(&self, hash: Hash, signature: &ChunkSignature) {
+        let sid = Self::shard_id(&hash);
+        if let Ok(mut index) = self.shards[sid].lock() {
+            index.insert(hash, signature);
+        }
+    }
+
+    /// Rebuild all shards from stored (hash, signature) pairs.
+    pub fn rebuild(&self, entries: Vec<(Hash, ChunkSignature)>) {
+        // Clear all shards
+        for shard in &self.shards {
+            if let Ok(mut index) = shard.lock() {
+                index.rebuild(std::iter::empty());
+            }
+        }
+        // Insert each entry into its correct shard
+        for (hash, sig) in entries {
+            let sid = Self::shard_id(&hash);
+            if let Ok(mut index) = self.shards[sid].lock() {
+                index.insert(hash, &sig);
+            }
+        }
+    }
+
+    /// Total entries across all shards.
+    pub fn len(&self) -> usize {
+        self.shards.iter().filter_map(|s| s.lock().ok()).map(|g| g.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Export all entries from all shards (for redistribution).
+    pub fn export_entries(&self) -> Vec<(Hash, ChunkSignature)> {
+        let mut all = Vec::new();
+        for shard in &self.shards {
+            if let Ok(index) = shard.lock() {
+                all.extend(index.export_entries());
+            }
+        }
+        all
     }
 }
 
