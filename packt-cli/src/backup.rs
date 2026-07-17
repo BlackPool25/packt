@@ -1,8 +1,36 @@
 use anyhow::{Context, Result};
 use packt_lib::store::{BackupOpts, Store};
+use packt_lib::types::ChunkConfig;
 use std::path::Path;
 
-pub fn run_backup(source: &Path, destination: &str, chunk_size: usize, threshold: f64, force: bool) -> Result<()> {
+/// Parse a chunk size argument.
+///
+/// Accepts human-readable presets:
+/// - `8k` or `8K` → ChunkConfig::for_docker() (4KB/8KB/64KB)
+/// - `32k` or `32K` → ChunkConfig::default_32k() (16KB/32KB/128KB)
+/// - `64k` or `64K` → ChunkConfig { 32KB/64KB/256KB }
+/// - A raw number (e.g., `16384`) → ChunkConfig with that avg_size
+fn parse_chunk_config(s: &str) -> Option<ChunkConfig> {
+    match s.to_lowercase().as_str() {
+        "8k" => Some(ChunkConfig::for_docker()),
+        "32k" => Some(ChunkConfig::default_32k()),
+        "64k" => Some(ChunkConfig {
+            min_size: 32_768,
+            avg_size: 65_536,
+            max_size: 262_144,
+        }),
+        _ => {
+            let bytes: usize = s.parse().ok()?;
+            Some(ChunkConfig {
+                min_size: (bytes / 2).max(64),
+                avg_size: bytes,
+                max_size: (bytes * 4).min(1_048_576),
+            })
+        }
+    }
+}
+
+pub fn run_backup(source: &Path, destination: &str, chunk_size_str: &str, threshold: f64, force: bool) -> Result<()> {
     if !source.exists() {
         anyhow::bail!("Source not found: {}", source.display());
     }
@@ -10,8 +38,15 @@ pub fn run_backup(source: &Path, destination: &str, chunk_size: usize, threshold
     let config = Store::config_from_uri(destination).context("Failed to parse store URI")?;
     let store = Store::open(config).context("Failed to open store")?;
 
+    let chunk_config = parse_chunk_config(chunk_size_str)
+        .context("Invalid chunk size. Use a preset (8k, 32k, 64k) or a raw byte count.")?;
+
+    if !chunk_config.validate() {
+        anyhow::bail!("Invalid chunk config: min/avg/max sizes violate constraints");
+    }
+
     let opts = BackupOpts {
-        chunk_size,
+        chunk_config,
         similarity_threshold: threshold,
         force,
     };

@@ -25,9 +25,9 @@ enum Commands {
         source: PathBuf,
         /// Store URI: /local/path, s3://bucket/key, gcs://bucket/key
         destination: String,
-        /// Average chunk size in bytes (default: 32768)
-        #[arg(long, default_value_t = 32768)]
-        chunk_size: usize,
+        /// Chunk size preset or raw bytes (default: 8k). Presets: 8k, 32k, 64k.
+        #[arg(long, default_value_t = String::from("8k"))]
+        chunk_size: String,
         /// Similarity detection threshold (0.0-1.0, default: 0.7). Set to 0 to disable.
         #[arg(long, default_value_t = 0.7)]
         similarity_threshold: f64,
@@ -87,7 +87,7 @@ fn main() {
             chunk_size,
             similarity_threshold,
             force,
-        } => backup::run_backup(source, destination, *chunk_size, *similarity_threshold, *force),
+        } => backup::run_backup(source, destination, chunk_size, *similarity_threshold, *force),
         Commands::List { store } => list::run_list(store),
         Commands::Restore {
             source,
