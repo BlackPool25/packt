@@ -5,6 +5,65 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-17
+
+### Added (Phase 4b — Cloud Storage + High-Level Store API)
+
+#### Cloud S3/GCS backend (feature-gated behind `cloud`)
+* **CloudStore** — Full `ContentStore` implementation for S3 and GCS via OpenDAL.
+  Feature-gated behind `cloud` to keep dependencies minimal for local-only users.
+* **OpenDAL integration** — Uses Apache OpenDAL v0.57 with `services-s3`,
+  `services-gcs`, and `blocking` features. Unified API for both backends.
+* **Pack strategy** — Same 16MB pack files as LocalStore. Packs serialized via
+  `pack::write_pack` and uploaded as single S3/GCS objects.
+* **Global index** — `packs/_meta.index` maintained alongside packs for fast
+  index rebuild on open. Falls back to pack footer scan if missing.
+* **Optional local LRU cache** — `cache_dir` parameter caches downloaded packs
+  locally. LRU eviction (default 128 packs ~ 2GB). Avoids re-downloading
+  frequently accessed chunks.
+* **`PacktError::Cloud`** variant — Wraps OpenDAL errors with context.
+
+#### High-level Store API (no feature gate needed for Local)
+* **`Store` enum** — Facade over `LocalStore` / `CloudStore` backends.
+* **`StoreConfig`** — `#[non_exhaustive]` enum: `Local { path }`,
+  `S3 { bucket, region, endpoint, ... }`, `GCS { bucket, prefix, ... }`.
+* **`Store::open(config)`** — Opens any backend from config.
+* **`Store::backup(source, opts)`** — Full pipeline + manifest write.
+  Supports incremental backup via mtime+size check.
+* **`Store::restore(dest, file?)`** — Restore one or all files with mtime preservation.
+* **`Store::list_files()`** — List backed-up files with size, mtime, chunk count.
+* **`Store::info()`** — File count, total bytes, total chunks.
+* **`Store::verify(file?)`** — Verify all chunks via BLAKE3 checksum.
+* **`Store::delete_file(name)`** — Remove manifest (no GC yet — Phase 4d).
+* **`Store::has_file(name)`** — Check if file exists.
+* **`Store::iter_chunks()`** — Stub for future GC (Phase 4d).
+* **`Store::config_from_uri(uri)`** — Parse `s3://`, `gcs://`, `/path` URIs.
+* **Manifest storage** — JSON manifests stored in `manifests/` dir (local) or
+  `manifests/` prefix (cloud).
+
+#### CLI improvements
+* **URI-style store paths** — All store arguments accept `/local/path`,
+  `s3://bucket/key`, or `gcs://bucket/prefix`.
+* **`packt migrate <src> <dst>`** — Migrate data between any backends.
+  Uses restore-to-temp + backup-from-temp (chunk-level copy planned).
+* **CLI simplification** — All commands rewritten to use `Store` API.
+  Net deletion of 391 lines.
+
+#### Internal fixes
+* **`get_inner()` fall-through** — `LocalStore` and `CloudStore` now fall
+  through to linear scan when index has stale placeholder entries (fixes
+  intra-process restore after backup).
+* **Phase 4a fix verified** — The O(1) index bug (placeholder `PackLocation`
+  with offset=0 after flush) is now handled gracefully.
+
+### Dependencies
+* `opendal` v0.57 (optional, `cloud` feature) — Unified S3/GCS access
+* `lru` v0.12 (optional, `cloud` feature) — LRU cache eviction
+* `tokio` v1 (optional, `cloud` feature, `rt` feature) — Runtime for OpenDAL
+* `filetime` v0.2 (new core dep) — Mtime restoration
+* `serde_json` v1 (new core dep) — Manifest serialization
+* `tempfile` v3 (CLI dep) — Temp dir for migrate command
+
 ## [0.5.2] - 2026-07-17
 
 ### Added

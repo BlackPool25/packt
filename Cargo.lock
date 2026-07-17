@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "packt-cli"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "packt-lib"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "criterion",
