@@ -8,6 +8,7 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
+#![doc = include_str!("../README.md")]
 
 pub mod chunking;
 pub mod error;
