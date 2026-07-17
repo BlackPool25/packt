@@ -24,14 +24,19 @@ pub struct PipelineConfig {
     pub chunk_config: ChunkConfig,
     pub compression_level: i32,
     pub similarity_config: Option<SimilarityConfig>,
+    /// Capacity of the bounded channel between chunker and writer.
+    /// Default 64. Increase for high-latency store backends (e.g., S3)
+    /// to keep the chunker running while the writer is blocked on I/O.
+    pub channel_capacity: usize,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            chunk_config: ChunkConfig::default_32k(),
+            chunk_config: ChunkConfig::default(),
             compression_level: 3,
             similarity_config: Some(SimilarityConfig::default()),
+            channel_capacity: 64,
         }
     }
 }
@@ -102,7 +107,8 @@ impl BackupPipeline {
         // Stream chunks via fastcdc's StreamCDC — internal buffer = max_size
         let chunker = fastcdc::v2020::StreamCDC::new(file, config.min_size, config.avg_size, config.max_size);
 
-        let (writer_tx, writer_rx): (crossbeam_channel::Sender<WriterMessage>, _) = crossbeam_channel::bounded(64);
+        let (writer_tx, writer_rx): (crossbeam_channel::Sender<WriterMessage>, _) =
+            crossbeam_channel::bounded(self.config.channel_capacity);
 
         let writer_handle = {
             let store = self.store.clone();
