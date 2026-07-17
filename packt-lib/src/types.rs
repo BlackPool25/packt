@@ -97,6 +97,28 @@ impl ChunkConfig {
         }
     }
 
+    /// Docker/OCI-optimized config: min=4KB, avg=8KB, max=64KB.
+    ///
+    /// Smaller chunks capture micro-changes in tar-based container layers
+    /// (file permissions, small edits) and align with VM block granularity.
+    #[must_use]
+    pub fn for_docker() -> Self {
+        Self {
+            min_size: 4096,   // 4 KB
+            avg_size: 8192,   // 8 KB
+            max_size: 65_536, // 64 KB
+        }
+    }
+
+    /// ML checkpoint-optimized config: min=4KB, avg=8KB, max=64KB.
+    ///
+    /// Same as Docker config. safetensors-aware chunk hints provide
+    /// additional tensor-boundary alignment (see ChunkHinter trait).
+    #[must_use]
+    pub fn for_ml() -> Self {
+        Self::for_docker()
+    }
+
     /// Validate the configuration.
     #[must_use]
     pub fn validate(&self) -> bool {
@@ -109,7 +131,7 @@ impl ChunkConfig {
 
 impl Default for ChunkConfig {
     fn default() -> Self {
-        Self::default_32k()
+        Self::for_docker()
     }
 }
 
