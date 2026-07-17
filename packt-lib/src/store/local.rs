@@ -230,6 +230,8 @@ impl LocalStore {
         // IMPORTANT: Guard must be dropped before read_from_location because
         // delta chunks recursively call get_inner, which would re-lock index
         // and deadlock (std Mutex is not reentrant).
+        // NOTE: If the index entry is stale (e.g. placeholder offset=0 after
+        // flush), we fall through to the linear scan instead of erroring.
         let loc = if let Ok(guard) = self.index.lock() {
             if let Some(ref index) = *guard {
                 index.lookup(hash)
@@ -240,7 +242,9 @@ impl LocalStore {
             None
         };
         if let Some(loc) = loc {
-            return self.read_from_location(hash, loc, depth);
+            if let Ok(data) = self.read_from_location(hash, loc, depth) {
+                return Ok(data);
+            }
         }
 
         // Phase 3: Fall back to linear scan (for index misses / missing index).

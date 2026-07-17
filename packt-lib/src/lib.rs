@@ -22,4 +22,5 @@ pub mod types;
 
 pub use error::{PacktError, Result as PacktResult};
 pub use similarity::SimilarityConfig;
+pub use store::{FileInfo, Store, StoreConfig, StoreInfo, VerifyReport};
 pub use types::{Chunk, ChunkConfig, Hash, PackLocation};
