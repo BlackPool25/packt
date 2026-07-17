@@ -1,5 +1,5 @@
 [workspace]
-members = ["packt-lib", "packt-cli"]
+members = ["packt-lib", "packt-cli", "packt-proxy"]
 resolver = "2"
 
 [profile.release]
