@@ -29,6 +29,9 @@ pub enum PacktError {
 
     #[error("Configuration error: {0}")]
     Config(String),
+
+    #[error("Similarity index error: {0}")]
+    Similarity(String),
 }
 
 impl From<std::io::Error> for PacktError {

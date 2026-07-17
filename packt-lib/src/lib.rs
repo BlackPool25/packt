@@ -14,9 +14,11 @@ pub mod error;
 pub mod hash;
 pub mod index;
 pub mod pipeline;
+pub mod similarity;
 pub mod store;
 pub mod types;
 // pub mod util; // Removed: BufferPool was unused; re-add when needed
 
 pub use error::{PacktError, Result as PacktResult};
+pub use similarity::SimilarityConfig;
 pub use types::{Chunk, ChunkConfig, Hash, PackLocation};
