@@ -73,7 +73,23 @@ impl LocalStore {
             .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "pack"))
             .collect();
-        pack_files.sort_by_key(std::fs::DirEntry::file_name);
+        // Sort numerically by pack_id, NOT lexicographically.
+        // Lexicographic sort causes "10.pack" < "2.pack", which makes
+        // next_pack_id = id + 1 overwrite the correct max with a lower
+        // value, causing new packs to silently overwrite existing ones.
+        pack_files.sort_by(|a, b| {
+            let a_name = a.file_name().to_string_lossy().into_owned();
+            let b_name = b.file_name().to_string_lossy().into_owned();
+            let a_id = a_name
+                .strip_suffix(".pack")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            let b_id = b_name
+                .strip_suffix(".pack")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            a_id.cmp(&b_id)
+        });
 
         for entry in &pack_files {
             let name = entry.file_name();
@@ -86,7 +102,7 @@ impl LocalStore {
                 match pack::read_pack(&data) {
                     Ok((entries, _checksum, superblock)) => {
                         packs.insert(id, PackMetadata { entries, superblock });
-                        next_pack_id = id + 1;
+                        next_pack_id = next_pack_id.max(id + 1);
                     }
                     Err(e) => {
                         return Err(PacktError::StoreCorrupted(format!(
@@ -412,7 +428,6 @@ impl LocalStore {
 
 /// Write `packs/_meta.index` for fast index rebuild on reopen.
 fn write_meta_index(state: &StoreState, root: &Path) -> Result<()> {
-    use crate::store::pack;
     let mut entries: Vec<MetaIndexEntry> = Vec::new();
     for (&pack_id, pack) in &state.packs {
         for pe in &pack.entries {
@@ -430,8 +445,7 @@ fn write_meta_index(state: &StoreState, root: &Path) -> Result<()> {
         let _ = std::fs::remove_file(&meta_path);
         return Ok(());
     }
-    let data = postcard::to_stdvec(&entries)
-        .map_err(|e| PacktError::Serialization(format!("meta index: {e}")))?;
+    let data = postcard::to_stdvec(&entries).map_err(|e| PacktError::Serialization(format!("meta index: {e}")))?;
     std::fs::write(&meta_path, data).map_err(|e| PacktError::Io {
         context: "failed to write _meta.index".into(),
         source: e,
@@ -607,29 +621,33 @@ impl ContentStore for LocalStore {
     }
 
     fn flush(&self) -> Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+        if state.pending_chunks.is_empty() {
+            write_meta_index(&state, &self.root)?;
+            return Ok(());
+        }
+        drop(state);
         let mut state = self
             .state
             .lock()
             .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-        if !state.pending_chunks.is_empty() {
-            let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
-            let chunks = Self::flush_prepare(&mut state, pack_id);
-            let root = self.root.clone();
-            drop(state);
-            let meta = Self::flush_write(&chunks, pack_id, &root)?;
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-            state.packs.insert(pack_id, meta);
-            write_meta_index(&state, &self.root)?;
-        } else {
-            write_meta_index(&state, &self.root)?;
-        }
+        let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
+        let chunks = Self::flush_prepare(&mut state, pack_id);
+        let root = self.root.clone();
+        drop(state);
+        let meta = Self::flush_write(&chunks, pack_id, &root)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
+        state.packs.insert(pack_id, meta);
+        write_meta_index(&state, &self.root)?;
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

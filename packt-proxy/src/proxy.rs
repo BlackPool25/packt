@@ -10,19 +10,19 @@
 
 use axum::{
     Router,
-    extract::{Path, State, Query},
+    body::Body,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{any, get, head},
-    body::Body,
 };
-use opendal::services::Fs;
 use opendal::Operator;
+use opendal::services::Fs;
 use serde::Deserialize;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::path::PathBuf;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 /// Shared application state.
 pub struct AppState {
@@ -37,8 +37,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(upstream: &str, cache_dir: &PathBuf, _chunk_size: &str) -> anyhow::Result<Self> {
-        let builder = Fs::default()
-            .root(cache_dir.to_str().unwrap_or("/tmp/packt-proxy-cache"));
+        let builder = Fs::default().root(cache_dir.to_str().unwrap_or("/tmp/packt-proxy-cache"));
         let cache = Operator::new(builder)?.finish();
 
         let upstream_host = upstream
@@ -215,12 +214,7 @@ async fn proxy_upstream_blob(
 }
 
 /// Forward HEAD to upstream.
-async fn proxy_upstream_head(
-    state: &Arc<AppState>,
-    name: &str,
-    digest: &str,
-    headers: &HeaderMap,
-) -> Response {
+async fn proxy_upstream_head(state: &Arc<AppState>, name: &str, digest: &str, headers: &HeaderMap) -> Response {
     let upstream_url = format!("{}/v2/{}/blobs/{}", state.upstream, name, digest);
     let mut req = state.client.head(&upstream_url);
     if let Some(auth) = headers.get(header::AUTHORIZATION) {
@@ -232,7 +226,8 @@ async fn proxy_upstream_head(
             for (k, v) in resp.headers() {
                 response = response.header(k, v);
             }
-            response.body(Body::empty())
+            response
+                .body(Body::empty())
                 .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
         }
         Err(e) => {
@@ -243,10 +238,7 @@ async fn proxy_upstream_head(
 }
 
 /// Generic upstream passthrough handler for non-blob endpoints.
-async fn handle_upstream(
-    State(state): State<Arc<AppState>>,
-    req: axum::extract::Request,
-) -> Response {
+async fn handle_upstream(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
     let path = req.uri().path();
     let query = req.uri().query().map(|q| format!("?{q}")).unwrap_or_default();
     let upstream_url = format!("{}{}{}", state.upstream, path, query);
