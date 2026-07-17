@@ -22,9 +22,10 @@ Content-defined chunking with exact dedup, near-duplicate detection, zstd delta 
 packt-lib = "0.6"
 ```
 
-```rust
+```rust,no_run
+# use std::error::Error;
+# fn main() -> Result<(), Box<dyn Error>> {
 use packt_lib::store::{Store, StoreConfig, BackupOpts};
-use packt_lib::types::Hash;
 
 // Open a local store
 let store = Store::open(StoreConfig::Local {
@@ -42,6 +43,8 @@ for file in store.list_files()? {
 
 // Restore a file
 store.restore("./restored".as_ref(), Some("myfile.big"))?;
+# Ok(())
+# }
 ```
 
 ### S3 / GCS Store (enable `cloud` feature)
@@ -51,7 +54,9 @@ store.restore("./restored".as_ref(), Some("myfile.big"))?;
 packt-lib = { version = "0.6", features = ["cloud"] }
 ```
 
-```rust
+```rust,no_run
+# #[cfg(feature = "cloud")]
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 use packt_lib::store::{Store, StoreConfig};
 
 // S3
@@ -64,16 +69,13 @@ let store = Store::open(StoreConfig::S3 {
     cache_dir: Some("./cache".into()),
 })?;
 
-// GCS
-let store = Store::open(StoreConfig::GCS {
-    bucket: "my-backups".into(),
-    prefix: Some("servers/".into()),
-    cache_dir: Some("./cache".into()),
-})?;
-
 // URI shortcut (available in CLI, also works in library)
 let config = Store::config_from_uri("s3://my-backups/servers/?region=us-east-1")?;
 let store = Store::open(config)?;
+# Ok(())
+# }
+# #[cfg(not(feature = "cloud"))]
+# fn main() {}
 ```
 
 ## Features

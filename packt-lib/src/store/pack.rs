@@ -18,7 +18,7 @@
 //! ```text
 //! [super_block_zstd] [delta_0] ... [delta_N] [index] [footer]
 //! ```
-//! Where `super_block_zstd` decompresses to: [full_chunk0_raw][full_chunk1_raw]...
+//! Where `super_block_zstd` decompresses to: `[full_chunk0_raw]` `[full_chunk1_raw]`...
 //! Index entries for Full/FullRaw point into the decompressed super-block.
 //! Index entries for Delta point to their zstd dict frames in the pack.
 
