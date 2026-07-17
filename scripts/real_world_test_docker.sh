@@ -8,7 +8,8 @@ VERSIONS=("22.04" "23.04" "23.10" "24.04")
 WORK_DIR=$(mktemp -d)
 STORE_DIR="${WORK_DIR}/store"
 LAYERS_DIR="${WORK_DIR}/layers"
-COMPRESSOR_BIN="${CARGO_TARGET_DIR:-target}/release/packt-cli"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+COMPRESSOR_BIN="${CARGO_TARGET_DIR:-$(dirname "$SCRIPT_DIR")/target}/release/packt"
 
 echo -e "${CYAN}=== Real-World Docker Layer Packt Test ===${NC}"
 echo "Image:        $IMAGE"
@@ -88,7 +89,7 @@ for VER in "${VERSIONS[@]}"; do
     echo -n "  ${VER}: "
     cat "${VER_DIR}"/*.tar > "${WORK_DIR}/${VER}.bin" 2>/dev/null
     if [ -f "${WORK_DIR}/${VER}.bin" ]; then
-        $COMPRESSOR_BIN backup "${WORK_DIR}/${VER}.bin" "$STORE_DIR" 2>&1 | tail -1
+        $COMPRESSOR_BIN backup "$STORE_DIR" "${WORK_DIR}/${VER}.bin" 2>$COMPRESSOR_BIN backup "${WORK_DIR}/${VER}.bin" "$STORE_DIR" 2>&11 | tail -1
     fi
 done
 END_TIME=$(date +%s%N)
