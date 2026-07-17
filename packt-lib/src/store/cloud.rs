@@ -3,9 +3,12 @@ use crate::index::DedupIndex;
 use crate::store::ContentStore;
 use crate::store::pack;
 use crate::types::{Hash, PackLocation};
+use lru::LruCache;
 use opendal::blocking;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
@@ -31,6 +34,9 @@ pub struct CloudStore {
     pack_target_size: u64,
     next_pack_id: AtomicU32,
     index: Mutex<Option<Arc<dyn DedupIndex>>>,
+    /// Optional local disk cache for downloaded packs.
+    cache: Option<Mutex<LruCache<u32, ()>>>,
+    cache_dir: Option<PathBuf>,
 }
 
 #[cfg(feature = "cloud")]
@@ -73,6 +79,7 @@ const PACK_DIR: &str = "packs/";
 const META_INDEX_PATH: &str = "packs/_meta.index";
 #[cfg(feature = "cloud")]
 const DEFAULT_PACK_TARGET: u64 = 16 * 1024 * 1024; // 16 MB
+const DEFAULT_CACHE_CAPACITY: usize = 128; // max 128 packs = ~2GB at 16MB each
 
 #[cfg(feature = "cloud")]
 impl CloudStore {
@@ -84,7 +91,7 @@ impl CloudStore {
     /// If the bucket already contains packs, the index is populated from
     /// `_meta.index` (fast path) or by scanning pack footers (fallback).
     #[allow(clippy::needless_pass_by_value)]
-    pub fn open(operator: opendal::Operator, index: Arc<dyn DedupIndex>) -> Result<Self> {
+    pub fn open(operator: opendal::Operator, index: Arc<dyn DedupIndex>, cache_dir: Option<PathBuf>) -> Result<Self> {
         let rt = Runtime::new()
             .map_err(|e| PacktError::Config(format!("failed to create tokio runtime for CloudStore: {e}")))?;
         let guard = rt.enter();
@@ -93,6 +100,12 @@ impl CloudStore {
             source: e,
         })?;
         drop(guard);
+
+        let cache = cache_dir.as_ref().map(|dir| {
+            let cache_packs = dir.join("packs");
+            std::fs::create_dir_all(&cache_packs).ok();
+            Mutex::new(LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap()))
+        });
 
         let store = Self {
             _rt: rt,
@@ -105,6 +118,8 @@ impl CloudStore {
             pack_target_size: DEFAULT_PACK_TARGET,
             next_pack_id: AtomicU32::new(0),
             index: Mutex::new(Some(index.clone())),
+            cache,
+            cache_dir,
         };
 
         // Populate index from existing packs
@@ -229,7 +244,13 @@ impl CloudStore {
     }
 
     /// Phase 2: write pack bytes to cloud (no lock held).
-    fn flush_write(chunks: &[pack::PackEntry], pack_id: u32, operator: &blocking::Operator) -> Result<PackMetadata> {
+    /// Optionally writes to local cache when `cache_path` is provided.
+    fn flush_write(
+        chunks: &[pack::PackEntry],
+        pack_id: u32,
+        operator: &blocking::Operator,
+        cache_path: Option<&Path>,
+    ) -> Result<PackMetadata> {
         if chunks.is_empty() {
             return Ok(PackMetadata::default());
         }
@@ -243,6 +264,11 @@ impl CloudStore {
                 context: format!("failed to upload pack {pack_id}"),
                 source: e,
             })?;
+
+        if let Some(cache_dir) = cache_path {
+            let cache_pack_path = cache_dir.join(format!("{pack_id:08}.pack"));
+            std::fs::write(&cache_pack_path, &pack_bytes).ok();
+        }
 
         match pack::read_pack(&pack_bytes) {
             Ok((entries, _checksum, superblock)) => Ok(PackMetadata { entries, superblock }),
@@ -282,6 +308,53 @@ impl CloudStore {
         })?;
 
         Ok(())
+    }
+
+    /// Read pack bytes, checking local cache first if enabled.
+    fn read_pack_cached(&self, pack_id: u32) -> Result<(Vec<u8>, bool)> {
+        let pack_path = format!("{PACK_DIR}{pack_id:08}.pack");
+
+        // Check local cache first
+        if let Some(ref cache) = self.cache {
+            let cache_pack_path = self
+                .cache_dir
+                .as_ref()
+                .unwrap()
+                .join("packs")
+                .join(format!("{pack_id:08}.pack"));
+            if cache_pack_path.exists() {
+                if let Ok(data) = std::fs::read(&cache_pack_path) {
+                    // Promote in LRU
+                    if let Ok(mut guard) = cache.lock() {
+                        guard.put(pack_id, ());
+                    }
+                    return Ok((data, true));
+                }
+            }
+        }
+
+        // Download from cloud
+        let pack_buf = self.operator.read(&pack_path).map_err(|e| PacktError::Cloud {
+            context: format!("failed to download pack {pack_id}"),
+            source: e,
+        })?;
+        let data = pack_buf.to_vec();
+
+        // Write to cache
+        if let Some(ref cache) = self.cache {
+            let cache_pack_path = self
+                .cache_dir
+                .as_ref()
+                .unwrap()
+                .join("packs")
+                .join(format!("{pack_id:08}.pack"));
+            if let Ok(mut guard) = cache.lock() {
+                guard.put(pack_id, ());
+            }
+            std::fs::write(&cache_pack_path, &data).ok();
+        }
+
+        Ok((data, false))
     }
 
     /// O(1) lookup via DedupIndex.
@@ -368,12 +441,7 @@ impl CloudStore {
     /// `state.packs` — works even when index was populated from `_meta.index`
     /// without loading pack metadata into memory.
     fn read_from_location(&self, hash: &Hash, loc: PackLocation, depth: usize) -> Result<Vec<u8>> {
-        let pack_path = format!("{PACK_DIR}{:08}.pack", loc.pack_id);
-        let pack_buf = self.operator.read(&pack_path).map_err(|e| PacktError::Cloud {
-            context: format!("failed to download pack {}", loc.pack_id),
-            source: e,
-        })?;
-        let pack_data = pack_buf.to_vec();
+        let (pack_data, _from_cache) = self.read_pack_cached(loc.pack_id)?;
 
         let (entries, _checksum, superblock) = pack::read_pack(&pack_data)
             .map_err(|e| PacktError::StoreCorrupted(format!("pack {} corrupted: {e}", loc.pack_id)))?;
@@ -490,8 +558,9 @@ impl ContentStore for CloudStore {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state);
             let operator = self.operator.clone();
+            let cache_path = self.cache_dir.as_ref().map(|d| d.join("packs"));
             drop(state);
-            let meta = Self::flush_write(&chunks, pack_id, &operator)?;
+            let meta = Self::flush_write(&chunks, pack_id, &operator, cache_path.as_deref())?;
             let mut state = self
                 .state
                 .lock()
@@ -541,8 +610,9 @@ impl ContentStore for CloudStore {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state);
             let operator = self.operator.clone();
+            let cache_path = self.cache_dir.as_ref().map(|d| d.join("packs"));
             drop(state);
-            let meta = Self::flush_write(&chunks, pack_id, &operator)?;
+            let meta = Self::flush_write(&chunks, pack_id, &operator, cache_path.as_deref())?;
             let mut state = self
                 .state
                 .lock()
@@ -609,8 +679,9 @@ impl ContentStore for CloudStore {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state);
             let operator = self.operator.clone();
+            let cache_path = self.cache_dir.as_ref().map(|d| d.join("packs"));
             drop(state);
-            let meta = Self::flush_write(&chunks, pack_id, &operator)?;
+            let meta = Self::flush_write(&chunks, pack_id, &operator, cache_path.as_deref())?;
             let mut state = self
                 .state
                 .lock()
@@ -641,7 +712,7 @@ mod tests {
             })?
             .finish();
         let index = Arc::new(HashIndex::new(1_000_000));
-        let store = CloudStore::open(op, index.clone())?;
+        let store = CloudStore::open(op, index.clone(), None)?;
         Ok((index, store))
     }
 
@@ -775,7 +846,7 @@ mod tests {
 
         {
             let index = Arc::new(HashIndex::new(1_000_000));
-            let store = CloudStore::open(op.clone(), index.clone())?;
+            let store = CloudStore::open(op.clone(), index.clone(), None)?;
 
             let data = b"persistent index data".to_vec();
             let hash = Hash::from_blake3(blake3::hash(&data));
@@ -785,13 +856,94 @@ mod tests {
 
         // Reopen with fresh index — should populate via _meta.index
         let index2 = Arc::new(HashIndex::new(1_000_000));
-        let store2 = CloudStore::open(op, index2.clone())?;
+        let store2 = CloudStore::open(op, index2.clone(), None)?;
 
         let data = b"persistent index data".to_vec();
         let hash = Hash::from_blake3(blake3::hash(&data));
         assert!(store2.contains(&hash)?);
         let retrieved = store2.get(&hash)?;
         assert_eq!(retrieved, data);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cloud_store_cache_hit() -> Result<()> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let op = Operator::new(services::Memory::default())
+            .map_err(|e| PacktError::Cloud {
+                context: "failed to create memory operator".into(),
+                source: e,
+            })?
+            .finish();
+        let index = Arc::new(HashIndex::new(1_000_000));
+        let store = CloudStore::open(op.clone(), index.clone(), Some(tmp.path().to_path_buf()))?;
+
+        let data = b"cached test data".to_vec();
+        let hash = Hash::from_blake3(blake3::hash(&data));
+        store.put(&hash, &data)?;
+        store.flush()?;
+
+        // First get: downloads from cloud (no cache hit)
+        let result = store.get(&hash)?;
+        assert_eq!(result, data);
+
+        // Second get: should hit cache
+        let result2 = store.get(&hash)?;
+        assert_eq!(result2, data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cloud_store_cache_disabled() -> Result<()> {
+        let op = Operator::new(services::Memory::default())
+            .map_err(|e| PacktError::Cloud {
+                context: "failed to create memory operator".into(),
+                source: e,
+            })?
+            .finish();
+        let index = Arc::new(HashIndex::new(1_000_000));
+        // No cache_dir = cache disabled
+        let store = CloudStore::open(op, index.clone(), None)?;
+
+        let data = b"no cache data".to_vec();
+        let hash = Hash::from_blake3(blake3::hash(&data));
+        store.put(&hash, &data)?;
+        store.flush()?;
+
+        let result = store.get(&hash)?;
+        assert_eq!(result, data);
+        Ok(())
+    }
+
+    #[test]
+    fn test_cloud_store_cache_persists_across_opens() -> Result<()> {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let op = Operator::new(services::Memory::default())
+            .map_err(|e| PacktError::Cloud {
+                context: "failed to create memory operator".into(),
+                source: e,
+            })?
+            .finish();
+
+        // First session with cache
+        let index = Arc::new(HashIndex::new(1_000_000));
+        let store = CloudStore::open(op.clone(), index.clone(), Some(tmp.path().to_path_buf()))?;
+        let data = b"cache persist data".to_vec();
+        let hash = Hash::from_blake3(blake3::hash(&data));
+        store.put(&hash, &data)?;
+        store.flush()?;
+
+        // Read to populate cache
+        store.get(&hash)?;
+        drop(store);
+
+        // Second session with same cache dir — cache file exists
+        // but index must be repopulated from _meta.index
+        let index2 = Arc::new(HashIndex::new(1_000_000));
+        let store2 = CloudStore::open(op, index2.clone(), Some(tmp.path().to_path_buf()))?;
+        let result = store2.get(&hash)?;
+        assert_eq!(result, data);
         Ok(())
     }
 }
