@@ -547,6 +547,11 @@ impl Store {
 
         let stats = pipeline.backup_file(source)?;
 
+        // Ensure all pending data is flushed before writing the manifest.
+        // The pipeline's writer thread calls store.flush(), but an extra
+        // flush here guarantees no pending chunks are missed.
+        self.store.flush()?;
+
         let meta = std::fs::metadata(source)?;
         let entry = ManifestEntry {
             path: name.clone(),

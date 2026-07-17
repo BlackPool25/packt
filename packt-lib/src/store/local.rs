@@ -4,10 +4,21 @@ use crate::store::ContentStore;
 use crate::store::pack;
 use crate::store::pack::IndexEntry;
 use crate::types::{Hash, PackLocation};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Entry in the global `_meta.index` file for fast index rebuild.
+#[derive(Debug, Serialize, Deserialize)]
+struct MetaIndexEntry {
+    hash: [u8; 32],
+    pack_id: u32,
+    offset: u64,
+    length: u32,
+    orig_length: u32,
+}
 
 /// Local filesystem content-addressed store.
 ///
@@ -399,6 +410,35 @@ impl LocalStore {
     }
 }
 
+/// Write `packs/_meta.index` for fast index rebuild on reopen.
+fn write_meta_index(state: &StoreState, root: &Path) -> Result<()> {
+    use crate::store::pack;
+    let mut entries: Vec<MetaIndexEntry> = Vec::new();
+    for (&pack_id, pack) in &state.packs {
+        for pe in &pack.entries {
+            entries.push(MetaIndexEntry {
+                hash: pe.hash.0,
+                pack_id,
+                offset: pe.offset,
+                length: pe.length,
+                orig_length: pe.orig_length,
+            });
+        }
+    }
+    let meta_path = root.join("packs/_meta.index");
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(&meta_path);
+        return Ok(());
+    }
+    let data = postcard::to_stdvec(&entries)
+        .map_err(|e| PacktError::Serialization(format!("meta index: {e}")))?;
+    std::fs::write(&meta_path, data).map_err(|e| PacktError::Io {
+        context: "failed to write _meta.index".into(),
+        source: e,
+    })?;
+    Ok(())
+}
+
 impl ContentStore for LocalStore {
     fn put(&self, hash: &Hash, data: &[u8]) -> Result<PackLocation> {
         // Phase 1: DedupIndex O(1) check (replaces O(n) linear pack scan).
@@ -433,7 +473,11 @@ impl ContentStore for LocalStore {
         });
         state.pending_size += data.len() as u64;
 
-        if state.pending_size >= self.pack_target_size {
+        // Track which pack_id the current chunk will be associated with.
+        // If auto-flush triggers, we use the pre-increment pack_id for the
+        // returned PackLocation so the index correctly points to the flush target.
+        let is_auto_flush = state.pending_size >= self.pack_target_size;
+        let current_pack_id = if is_auto_flush {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state, pack_id);
             let root = self.root.clone();
@@ -444,10 +488,14 @@ impl ContentStore for LocalStore {
                 .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
-        }
+            let _ = write_meta_index(&state, &self.root);
+            pack_id
+        } else {
+            self.next_pack_id.load(Ordering::SeqCst)
+        };
 
         Ok(PackLocation {
-            pack_id: self.next_pack_id.load(Ordering::SeqCst),
+            pack_id: current_pack_id,
             offset: 0,
             length: 0,
             orig_length,
@@ -486,7 +534,10 @@ impl ContentStore for LocalStore {
         });
         state.pending_size += delta_data.len() as u64;
 
-        if state.pending_size >= self.pack_target_size {
+        // Same pack_id fix as put() — use pre-increment value after auto-flush
+        // so the index entry correctly references the flushed pack.
+        let is_auto_flush = state.pending_size >= self.pack_target_size;
+        let current_pack_id = if is_auto_flush {
             let pack_id = self.next_pack_id.fetch_add(1, Ordering::SeqCst);
             let chunks = Self::flush_prepare(&mut state, pack_id);
             let root = self.root.clone();
@@ -497,10 +548,14 @@ impl ContentStore for LocalStore {
                 .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
-        }
+            let _ = write_meta_index(&state, &self.root);
+            pack_id
+        } else {
+            self.next_pack_id.load(Ordering::SeqCst)
+        };
 
         Ok(PackLocation {
-            pack_id: self.next_pack_id.load(Ordering::SeqCst),
+            pack_id: current_pack_id,
             offset: 0,
             length: 0,
             orig_length,
@@ -567,10 +622,14 @@ impl ContentStore for LocalStore {
                 .lock()
                 .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
             state.packs.insert(pack_id, meta);
+            write_meta_index(&state, &self.root)?;
+        } else {
+            write_meta_index(&state, &self.root)?;
         }
         Ok(())
     }
 }
+
 
 #[cfg(test)]
 mod tests {
