@@ -35,13 +35,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-* **Pipeline throughput** — Target ≥1 GB/s (was ~250 MB/s). Parallel batch
-  processing removes CPU-bound bottleneck.
+* **Pipeline architecture** — Two-phase batch processing: parallel hashing
+  (Rayon) followed by sequential dedup+similarity+write. Dedup must be
+  sequential because the index grows as chunks are stored; parallel dedup
+  within a batch sees stale index state. Hashing is parallelized because
+  BLAKE3 is CPU-bound.
+* **Store `put()` O(n) → O(1)** — Replaced linear scan over all pack entries
+  with DedupIndex lookup. Redundant check was O(n) per chunk, making the
+  writer thread O(n^2) overall.
+* **Incompressible data fast-path** — Quick entropy check (sample 1KB, count
+  unique byte values) skips zstd compression for random/incompressible data.
+  Prevents wasted CPU on zstd hash-table searches for random data.
+* **Pipe-through verification** — Remove redundant read-back in pack flush.
+  `flush_write()` now verifies from the in-memory buffer instead of reading
+  the just-written file back from disk.
+* **zstd level 3 (was 7)** — Level 3 is 2-3x faster with <10% ratio loss.
+  Level 7 was over-optimized for the dedup use case.
+* **zstdmt feature** — Multi-threaded zstd for super-block compression (4
+  workers). Speeds up large-pack flush on multi-core systems.
 * **SimilarityStage** — Now uses `ShardedPalantirIndex` internally. No external
   Mutex needed — sharding provides internal concurrency.
 * **PipelineConfig** — Added `progress_callback` field. `#[allow(dead_code)]`
   removed from `config` field.
 * `cargo test` count: 73 → 78 tests (unit + integration + property + fuzz).
+
+### Performance (Phase 4a final, zstd level 1)
+
+| Workload | Before | After | Improvement |
+|---|---|---|---|
+| 500MB zeros | ~250 MB/s | 1.9 GB/s | +660% |
+| 2GB random | ~225 MB/s | 291 MB/s | +29% |
+| Docker layers (5x, 363MB) | ~75 MB/s | 120 MB/s | +60% |
+
+Parallel hashing helps CPU-bound workloads (zeros = many dedup hits, minimal
+compression). I/O-bound workloads (random data) bottleneck on file read +
+FastCDC chunking, which are inherently sequential. zstd level and entropy-pass
+optimizations help reduce compression CPU waste.
+
+The pipeline is now limited by sequential FastCDC chunking throughput
+(~1.4 GB/s). Further gains require MinCDC or parallel chunking (Phase 4b+).
 
 ### Added (Phase 3 — Delta Compression)
 

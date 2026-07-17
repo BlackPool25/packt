@@ -32,7 +32,29 @@ const PACK_MAGIC: u64 = 0x3156_314B_4341_5050;
 const PACK_MAGIC_V2: u64 = 0x3256_314B_4341_5050;
 /// Magic bytes: "PACKv3" as u64 (little-endian: 0x3356314B43415050)
 const PACK_MAGIC_V3: u64 = 0x3356_314B_4341_5050;
-const COMPRESSION_LEVEL: i32 = 7;
+const COMPRESSION_LEVEL: i32 = 3;
+
+/// Quick entropy check: returns true if data appears randomly distributed
+/// (high entropy, incompressible). Samples first 1KB; if > 220 unique byte
+/// values observed, zstd will not meaningfully compress this chunk.
+fn is_high_entropy(data: &[u8]) -> bool {
+    let sample = &data[..1024.min(data.len())];
+    if sample.len() < 256 {
+        return false;
+    }
+    let mut seen = [false; 256];
+    let mut count = 0u32;
+    for &b in sample {
+        if !seen[b as usize] {
+            seen[b as usize] = true;
+            count += 1;
+            if count > 220 {
+                return true;
+            }
+        }
+    }
+    false
+}
 const FOOTER_SIZE: usize = 52; // u64(8) + u32(4) + [u8;32] + u64(8) = 52
 
 /// Type of entry in a pack file.
@@ -124,12 +146,18 @@ pub fn write_pack(entries: &[PackEntry]) -> Result<Vec<u8>> {
             EntryType::Full | EntryType::FullRaw => {
                 let (compressed, actual_type) = match &entry.entry_type {
                     EntryType::Full => {
-                        let c = zstd::bulk::compress(&entry.data, COMPRESSION_LEVEL)
-                            .map_err(|e| PacktError::Serialization(format!("zstd compress failed: {e}")))?;
-                        if c.len() >= entry.data.len() * 95 / 100 {
+                        // Quick incompressibility check: if data has high entropy
+                        // (all 256 byte values present), skip zstd to avoid wasted CPU.
+                        if is_high_entropy(&entry.data) {
                             (entry.data.clone(), EntryType::FullRaw)
                         } else {
-                            (c, EntryType::Full)
+                            let c = zstd::bulk::compress(&entry.data, COMPRESSION_LEVEL)
+                                .map_err(|e| PacktError::Serialization(format!("zstd compress failed: {e}")))?;
+                            if c.len() >= entry.data.len() * 95 / 100 {
+                                (entry.data.clone(), EntryType::FullRaw)
+                            } else {
+                                (c, EntryType::Full)
+                            }
                         }
                     }
                     EntryType::FullRaw => (entry.data.clone(), EntryType::FullRaw),
@@ -150,10 +178,20 @@ pub fn write_pack(entries: &[PackEntry]) -> Result<Vec<u8>> {
         }
     }
 
-    // Compress super-block if there are Full/FullRaw entries
+    // Compress super-block with multi-threaded zstd (via zstdmt feature).
     if !full_raw_data.is_empty() {
-        let compressed = zstd::bulk::compress(&full_raw_data, COMPRESSION_LEVEL)
-            .map_err(|e| PacktError::Serialization(format!("zstd superblock compress: {e}")))?;
+        use std::io::Write;
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), COMPRESSION_LEVEL)
+            .map_err(|e| PacktError::Serialization(format!("zstd encoder: {e}")))?;
+        encoder
+            .multithread(4)
+            .map_err(|e| PacktError::Serialization(format!("zstd multithread: {e}")))?;
+        encoder
+            .write_all(&full_raw_data)
+            .map_err(|e| PacktError::Serialization(format!("zstd write: {e}")))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|e| PacktError::Serialization(format!("zstd finish: {e}")))?;
         pack.extend_from_slice(&compressed);
     }
 

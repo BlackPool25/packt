@@ -147,11 +147,12 @@ impl LocalStore {
             dir.sync_all()?;
         }
 
-        let data = std::fs::read(&final_path)?;
-        match pack::read_pack(&data) {
+        // Parse the pack metadata from what we just wrote.
+        // (read_pack verifies checksum; if this fails the write is corrupt.)
+        match pack::read_pack(&pack_bytes) {
             Ok((entries, _checksum, superblock)) => Ok(PackMetadata { entries, superblock }),
             Err(e) => Err(PacktError::StoreCorrupted(format!(
-                "Just-written pack {} failed verification: {e}",
+                "Newly-constructed pack {} failed internal verification: {e}",
                 final_path.display()
             ))),
         }
@@ -225,13 +226,21 @@ impl LocalStore {
             }
         }
 
-        // Phase 2: Try the dedup index for O(1) lookup (no state lock needed).
-        if let Ok(guard) = self.index.lock() {
+        // Phase 2: Try the dedup index for O(1) lookup.
+        // IMPORTANT: Guard must be dropped before read_from_location because
+        // delta chunks recursively call get_inner, which would re-lock index
+        // and deadlock (std Mutex is not reentrant).
+        let loc = if let Ok(guard) = self.index.lock() {
             if let Some(ref index) = *guard {
-                if let Some(loc) = index.lookup(hash) {
-                    return self.read_from_location(hash, loc, depth);
-                }
+                index.lookup(hash)
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(loc) = loc {
+            return self.read_from_location(hash, loc, depth);
         }
 
         // Phase 3: Fall back to linear scan (for index misses / missing index).
@@ -325,6 +334,16 @@ impl LocalStore {
         )
     }
 
+    /// O(1) lookup via DedupIndex. Returns None if index is not set or miss.
+    fn lookup_index(&self, hash: &Hash) -> Option<PackLocation> {
+        if let Ok(guard) = self.index.lock() {
+            if let Some(ref idx) = *guard {
+                return idx.lookup(hash);
+            }
+        }
+        None
+    }
+
     /// Shared chunk data reader: decompress + verify checksum.
     #[allow(clippy::too_many_arguments)]
     fn read_chunk_data(
@@ -378,23 +397,16 @@ impl LocalStore {
 
 impl ContentStore for LocalStore {
     fn put(&self, hash: &Hash, data: &[u8]) -> Result<PackLocation> {
+        // Phase 1: DedupIndex O(1) check (replaces O(n) linear pack scan).
+        if let Some(loc) = self.lookup_index(hash) {
+            return Ok(loc);
+        }
+
+        // Phase 2: Check pending chunks (small set, must check under lock).
         let mut state = self
             .state
             .lock()
             .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-
-        for pack in state.packs.values() {
-            for entry in &pack.entries {
-                if &entry.hash == hash {
-                    return Ok(PackLocation {
-                        pack_id: 0,
-                        offset: entry.offset,
-                        length: entry.length,
-                        orig_length: entry.orig_length,
-                    });
-                }
-            }
-        }
         for entry in &state.pending_chunks {
             if entry.hash == *hash {
                 return Ok(PackLocation {
@@ -406,6 +418,7 @@ impl ContentStore for LocalStore {
             }
         }
 
+        // Phase 3: Append to pending buffer.
         let orig_length = data.len() as u32;
         state.pending_chunks.push(PendingEntry {
             hash: *hash,
@@ -438,23 +451,16 @@ impl ContentStore for LocalStore {
     }
 
     fn put_delta(&self, hash: &Hash, base_hash: &Hash, delta_data: &[u8], orig_length: u32) -> Result<PackLocation> {
+        // Phase 1: DedupIndex O(1) check (replaces O(n) linear pack scan).
+        if let Some(loc) = self.lookup_index(hash) {
+            return Ok(loc);
+        }
+
+        // Phase 2: Check pending chunks (small set, must check under lock).
         let mut state = self
             .state
             .lock()
             .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-
-        for pack in state.packs.values() {
-            for entry in &pack.entries {
-                if &entry.hash == hash {
-                    return Ok(PackLocation {
-                        pack_id: 0,
-                        offset: entry.offset,
-                        length: entry.length,
-                        orig_length: entry.orig_length,
-                    });
-                }
-            }
-        }
         for entry in &state.pending_chunks {
             if entry.hash == *hash {
                 return Ok(PackLocation {
@@ -466,6 +472,7 @@ impl ContentStore for LocalStore {
             }
         }
 
+        // Phase 3: Append to pending buffer.
         state.pending_chunks.push(PendingEntry {
             hash: *hash,
             data: delta_data.to_vec(),
@@ -515,17 +522,21 @@ impl ContentStore for LocalStore {
     }
 
     fn contains(&self, hash: &Hash) -> Result<bool> {
+        // O(1) check via DedupIndex.
+        if self.lookup_index(hash).is_some() {
+            return Ok(true);
+        }
+        // Fall back to linear scan of pending + packs for safety
+        // (index may not be populated in all code paths).
         let state = self
             .state
             .lock()
             .map_err(|e| PacktError::StoreCorrupted(format!("store lock poisoned: {e}")))?;
-
         for entry in &state.pending_chunks {
             if entry.hash == *hash {
                 return Ok(true);
             }
         }
-
         for pack in state.packs.values() {
             for entry in &pack.entries {
                 if &entry.hash == hash {
@@ -533,7 +544,6 @@ impl ContentStore for LocalStore {
                 }
             }
         }
-
         Ok(false)
     }
 

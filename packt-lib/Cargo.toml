@@ -13,7 +13,7 @@ categories = ["compression", "filesystem"]
 [dependencies]
 fastcdc = "4"
 blake3 = { version = "1", features = ["rayon"] }
-zstd = { version = "0.13" }
+zstd = { version = "0.13", features = ["zstdmt"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 rayon = "1"

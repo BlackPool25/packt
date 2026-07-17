@@ -95,28 +95,9 @@ fn group_super_features(features: &[u64; NUM_FEATURES]) -> ChunkSignature {
     }
 }
 
-fn compute_histogram(data: &[u8]) -> [u64; 256] {
-    let mut hist = [0u64; 256];
-    for &b in data {
-        hist[b as usize] += 1;
-    }
-    hist
-}
-
-fn histogram_disparity(a: &[u64; 256], b: &[u64; 256]) -> f64 {
-    let total: u64 = a.iter().zip(b.iter()).map(|(x, y)| (*x).max(*y)).sum();
-    if total == 0 {
-        return 0.0;
-    }
-    let diff: u64 = a.iter().zip(b.iter()).map(|(x, y)| (*x).abs_diff(*y)).sum();
-    diff as f64 / (2.0 * total as f64)
-}
-
-/// Check if two chunks are likely similar using a multi-stage filter:
+/// Check if two chunks are likely similar using a two-stage filter:
 /// 1. Head (first 64B) comparison — fast path for identical headers
 /// 2. Tail (last 64B) comparison — catches modifications in the body
-/// 3. Byte-frequency histogram — rejects false positives where head+tail
-///    match but content is completely different (structured binary formats)
 pub fn check_similarity(a: &[u8], b: &[u8]) -> bool {
     use xxhash_rust::xxh3::xxh3_64;
     let head_a = &a[..64.min(a.len())];
@@ -129,9 +110,7 @@ pub fn check_similarity(a: &[u8], b: &[u8]) -> bool {
         let tail_a = &a[a.len().saturating_sub(64)..];
         let tail_b = &b[b.len().saturating_sub(64)..];
         if (tail_a.as_ptr() != head_a.as_ptr() || a.len() != b.len()) && xxh3_64(tail_a) == xxh3_64(tail_b) {
-            let ha = compute_histogram(a);
-            let hb = compute_histogram(b);
-            return histogram_disparity(&ha, &hb) < 0.30;
+            return true;
         }
     }
     false
