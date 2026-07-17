@@ -118,7 +118,9 @@ pub struct VerifyReport {
 /// Options for backup operation.
 #[derive(Debug, Clone)]
 pub struct BackupOpts {
-    pub chunk_size: usize,
+    /// Chunking configuration (min/avg/max sizes).
+    /// Defaults to Docker/ML-optimized config: 4KB/8KB/64KB.
+    pub chunk_config: ChunkConfig,
     pub similarity_threshold: f64,
     pub force: bool,
 }
@@ -126,7 +128,7 @@ pub struct BackupOpts {
 impl Default for BackupOpts {
     fn default() -> Self {
         Self {
-            chunk_size: 32_768,
+            chunk_config: ChunkConfig::default(),
             similarity_threshold: 0.7,
             force: false,
         }
@@ -513,11 +515,7 @@ impl Store {
             return Ok(stats);
         }
 
-        let cfg = ChunkConfig {
-            min_size: (opts.chunk_size / 2).max(64),
-            avg_size: opts.chunk_size,
-            max_size: (opts.chunk_size * 4).min(1_048_576),
-        };
+        let cfg = opts.chunk_config;
         if !cfg.validate() {
             return Err(PacktError::Config("invalid chunk config".into()));
         }
