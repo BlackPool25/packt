@@ -15,15 +15,19 @@ use crate::store::ContentStore;
 use crate::store::delta::DeltaEncoder;
 use crate::types::{Chunk, ChunkConfig, Hash};
 
+use rayon::prelude::*;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+
+const PAR_BATCH_SIZE: usize = 32;
 
 /// Configuration for the backup pipeline.
 pub struct PipelineConfig {
     pub chunk_config: ChunkConfig,
     pub compression_level: i32,
     pub similarity_config: Option<SimilarityConfig>,
+    pub progress_callback: Option<crate::types::ProgressCallback>,
 }
 
 impl Default for PipelineConfig {
@@ -32,18 +36,19 @@ impl Default for PipelineConfig {
             chunk_config: ChunkConfig::default_32k(),
             compression_level: 3,
             similarity_config: Some(SimilarityConfig::default()),
+            progress_callback: None,
         }
     }
 }
 
 /// Backup pipeline orchestrator.
 pub struct BackupPipeline {
-    #[allow(dead_code)]
     config: PipelineConfig,
     hasher: Arc<dyn ContentHasher>,
     store: Arc<dyn ContentStore>,
     index: Arc<dyn DedupIndex>,
     similarity: Option<SimilarityStage>,
+    progress_callback: Option<crate::types::ProgressCallback>,
 }
 
 impl BackupPipeline {
@@ -59,12 +64,18 @@ impl BackupPipeline {
         index: Arc<dyn DedupIndex>,
     ) -> Self {
         let similarity = config.similarity_config.map(SimilarityStage::new);
+        let progress_callback = config.progress_callback;
+        let config = PipelineConfig {
+            progress_callback: None,
+            ..config
+        };
         Self {
             config,
             hasher,
             store,
             index,
             similarity,
+            progress_callback,
         }
     }
 
@@ -173,43 +184,42 @@ impl BackupPipeline {
         let mut chunk_hashes = Vec::new();
         let mut total_chunks = 0u64;
 
+        // Collect chunks from streaming CDC into batches for parallel processing.
+        // Chunking (StreamCDC) must remain sequential — it's a streaming operation.
+        let mut batch: Vec<Chunk> = Vec::with_capacity(PAR_BATCH_SIZE);
+
         for result in chunker {
             let chunk_data = result.map_err(|e| PacktError::Pipeline(format!("StreamCDC error: {e}")))?;
-
             let chunk = Chunk {
                 offset: chunk_data.offset,
                 length: chunk_data.length as u32,
                 data: chunk_data.data,
             };
             total_chunks += 1;
+            batch.push(chunk);
 
-            let chunk_len = u64::from(chunk.length);
-            let hash = hasher_stage.hash(&chunk);
-            chunk_hashes.push(hash);
-
-            let is_dup = dedup_stage.check(&hash);
-
-            let send_result = if is_dup {
-                writer_tx.send(WriterMessage::Skip { hash })
-            } else if let Some(ref similarity) = self.similarity {
-                match similarity.process(hash, chunk.data) {
-                    SimilarityOutcome::Unique { hash, data } | SimilarityOutcome::TooSmall { hash, data } => {
-                        stats.stored_size += chunk_len;
-                        writer_tx.send(WriterMessage::Store { hash, data })
-                    }
-                    SimilarityOutcome::NearDuplicate { hash, data, similar_to, tier } => {
-                        stats.stored_size += chunk_len;
-                        stats.near_duplicate_chunks += 1;
-                        writer_tx.send(WriterMessage::StoreNearDuplicate { hash, data, similar_to, tier })
-                    }
-                }
-            } else {
-                stats.stored_size += chunk_len;
-                writer_tx.send(WriterMessage::Store { hash, data: chunk.data })
-            };
-            if send_result.is_err() {
-                return Err(PacktError::Pipeline("writer thread exited prematurely".into()));
+            if batch.len() >= PAR_BATCH_SIZE {
+                self.process_batch(
+                    &batch,
+                    &hasher_stage,
+                    &dedup_stage,
+                    &writer_tx,
+                    &mut stats,
+                    &mut chunk_hashes,
+                )?;
+                batch.clear();
             }
+        }
+        // Process remaining chunks
+        if !batch.is_empty() {
+            self.process_batch(
+                &batch,
+                &hasher_stage,
+                &dedup_stage,
+                &writer_tx,
+                &mut stats,
+                &mut chunk_hashes,
+            )?;
         }
 
         // Drop sender to signal end of stream
@@ -227,13 +237,97 @@ impl BackupPipeline {
         stats.delta_savings = writer_output.delta_savings;
         stats.delta_fallbacks = writer_output.delta_fallbacks;
         stats.total_chunks = total_chunks;
-        stats.chunk_hashes = chunk_hashes;
         stats.similarity_index_size = self
             .similarity
             .as_ref()
             .map_or(0, similarity_stage::SimilarityStage::index_size);
 
         Ok(stats)
+    }
+
+    /// Process a batch of chunks in parallel using Rayon.
+    /// Hashing, dedup check, and similarity check run in parallel via `par_iter()`.
+    /// Results are sent to the writer thread sequentially (pack format requires
+    /// ordered writes). `chunk_hashes` is extended with the ordered hash sequence.
+    fn process_batch(
+        &self,
+        batch: &[Chunk],
+        hasher_stage: &HasherStage,
+        dedup_stage: &DedupStage,
+        writer_tx: &crossbeam_channel::Sender<WriterMessage>,
+        stats: &mut BackupStats,
+        chunk_hashes: &mut Vec<Hash>,
+    ) -> Result<()> {
+        // Parallel: hash + dedup + similarity for each chunk.
+        // Rayon preserves order on Vec-par_iter (IndexedParallelIterator).
+        let results: Vec<(WriterMessage, Hash, u64, bool)> = batch
+            .par_iter()
+            .map(|chunk| {
+                let hash = hasher_stage.hash(chunk);
+                let chunk_len = u64::from(chunk.length);
+
+                if dedup_stage.check(&hash) {
+                    (WriterMessage::Skip { hash }, hash, chunk_len, false)
+                } else if let Some(ref similarity) = self.similarity {
+                    match similarity.process(hash, chunk.data.clone()) {
+                        SimilarityOutcome::Unique { hash, data } | SimilarityOutcome::TooSmall { hash, data } => {
+                            (WriterMessage::Store { hash, data }, hash, chunk_len, false)
+                        }
+                        SimilarityOutcome::NearDuplicate {
+                            hash,
+                            data,
+                            similar_to,
+                            tier,
+                        } => (
+                            WriterMessage::StoreNearDuplicate {
+                                hash,
+                                data,
+                                similar_to,
+                                tier,
+                            },
+                            hash,
+                            chunk_len,
+                            true,
+                        ),
+                    }
+                } else {
+                    (
+                        WriterMessage::Store {
+                            hash,
+                            data: chunk.data.clone(),
+                        },
+                        hash,
+                        chunk_len,
+                        false,
+                    )
+                }
+            })
+            .collect();
+
+        // Sequential: update stats and send to writer in order.
+        for (msg, hash, chunk_len, is_near_dup) in results {
+            chunk_hashes.push(hash);
+            stats.stored_size += chunk_len;
+            if is_near_dup {
+                stats.near_duplicate_chunks += 1;
+            }
+            if writer_tx.send(msg).is_err() {
+                return Err(PacktError::Pipeline("writer thread exited prematurely".into()));
+            }
+        }
+
+        // Fire progress callback (at least once per 32 chunks).
+        if let Some(ref cb) = self.progress_callback {
+            cb(crate::types::ProgressInfo {
+                bytes_processed: stats.source_size,
+                chunks_found: stats.total_chunks,
+                dedup_hits: stats.dedup_chunks,
+                near_dup_hits: stats.near_duplicate_chunks,
+                delta_savings: stats.delta_savings,
+            });
+        }
+
+        Ok(())
     }
 
     /// Return whether similarity detection is enabled.

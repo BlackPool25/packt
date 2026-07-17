@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Information about pipeline progress, emitted via `ProgressCallback`.
+#[derive(Debug, Clone, Copy)]
+pub struct ProgressInfo {
+    pub bytes_processed: u64,
+    pub chunks_found: u64,
+    pub dedup_hits: u64,
+    pub near_dup_hits: u64,
+    pub delta_savings: u64,
+}
+
+/// Callback type for receiving pipeline progress events.
+pub type ProgressCallback = Box<dyn Fn(ProgressInfo) + Send + Sync>;
+
 /// A BLAKE3 hash used as content identifier (32 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Hash(pub [u8; 32]);
